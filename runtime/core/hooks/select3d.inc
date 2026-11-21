@@ -100,14 +100,16 @@ static void s3d_cache_free(const Ctx& c) {
 }
 
 // soft change from the last pose of the landing to the idle: the bone matrices blend for S3D_BLEND frames
-static const int S3D_BLEND = 32;
-static float s3d_pose[256][16];
+static const int S3D_BLEND = 4;
+static float s3d_pose[256][32];
 static int s3d_bone[256], s3d_nb = 0, s3d_blend = 0;
 static uint32_t s3d_snap_o = 0, s3d_snap_md = 0;   // the pose belongs to this object and model: never blended into another one
 static uint32_t s3d_mtx(uint32_t o) {
     uint32_t mb = psp_l32(o + 0x16B0);
     return mb && mb < 0x10000000u ? psp_l32(mb + 4 * psp_l32(o + 0x16B4) + 0xC) : 0;
 }
+static float s3d_off = 0.0f;   // vertical offset given to the fall so the feet land on the floor (world Y down)
+static int s3d_fall_f0 = -1, s3d_fall_len = 0;
 static void s3d_snap(uint32_t o) {
     uint32_t hdr = psp_l32(o + 0x14), bt = hdr ? psp_l32(hdr + 0x50) : 0, nb = hdr ? psp_l32(hdr + 8) : 0, tb = s3d_mtx(o);
     if (bt && bt < 0x08000000u) bt += hdr;
@@ -115,9 +117,9 @@ static void s3d_snap(uint32_t o) {
     if (!bt || !tb || tb >= 0x10000000u) return;
     for (uint32_t i = 0; i < nb && i < 256; i++) {
         int id = psp_l16(bt + 0xA0 * i + 0xA) & 0xFF;
-        if ((uint32_t)id >= nb) continue;
+        if (id >= 0x77) continue;   // the table holds 0x3B80 bytes: 119 ids (EBOOT_TTT 120.1)
         s3d_bone[s3d_nb] = id;
-        for (int k = 0; k < 16; k++) s3d_pose[s3d_nb][k] = cv_rf(tb + (uint32_t)id * 128 + 4 * (uint32_t)k);
+        for (int k = 0; k < 32; k++) s3d_pose[s3d_nb][k] = cv_rf(tb + (uint32_t)id * 128 + 4 * (uint32_t)k);   // both matrices of the bone: the draw emits the two (vertices blend between them)
         s3d_nb++;
     }
 }
@@ -127,7 +129,7 @@ static bool s3d_probed = false, s3d_hide = false;
 static int s3d_ptries = 0, s3d_land_f = -1;
 static void s3d_mark_list(Ctx& c, uint32_t a, uint32_t b);
 static void s3d_objmark(Ctx& c, bool before) { if (s3d_hide && cv_owner() == 2) s3d_mark_list(c, before ? 0x00EA0001u : 0x00EA0000u, 0); }
-struct S3dCam { float v[4]; };
+struct S3dCam { float v[4]; int feet[6] = {0}, nf = 0; float g = 0.0f; };   // camera, and the foot bones with their floor level in the idle pose
 static std::map<int, S3dCam> s3d_known;   // camera measured on each character's idle: the next time it starts there
 // bone position in the pose: bind position through the skinning matrix (row vectors). TTT models keep their vertices in
 // normalized units, so the matrix carries a uniform scale (about the model height; 1 in converted BT3 models): the
@@ -219,29 +221,93 @@ static void s3d_set_want(const float* hd, const float* ws, float h) {
 }
 // the idle pose, read while the object is drawn clipped to one pixel (the game fills the matrices of what it draws): up to
 // 10 frames with only the map visible, then the fall starts with the final camera. Kept per character for the next time
+// foot bones: the lowest bones of the idle pose (not the root nor bones at the model's origin); their lowest point is the floor of the fall
+static void s3d_feet_of(uint32_t o, uint32_t tb, float h, S3dCam& k) {
+    uint32_t hdr = psp_l32(o + 0x14), bt = hdr ? psp_l32(hdr + 0x50) : 0, nb = hdr ? psp_l32(hdr + 8) : 0;
+    if (bt && bt < 0x08000000u) bt += hdr;
+    std::vector<std::pair<float, int>> lo;
+    for (uint32_t i = 0; bt && i < nb && i < 256; i++) {
+        int id = psp_l16(bt + 0xA0 * i + 0xA) & 0xFF;
+        if (!id || id == 0x11 || id == 0x1F || id == 0x2D || (id >= 0x34 && id <= 0x36)) continue;
+        float p[3];
+        if (!s3d_bone_pos(o, tb, id, p)) continue;
+        if (std::fabs(p[1]) < 0.03f * h && sqrtf(p[0] * p[0] + p[2] * p[2]) < 0.03f * h) continue;
+        lo.push_back({p[1], id});
+    }
+    k.nf = 0;
+    if (lo.empty()) return;
+    std::sort(lo.begin(), lo.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) { return a.first > b.first; });
+    for (auto& x : lo) if (k.nf < 6 && x.first >= lo[0].first - 0.06f * h) k.feet[k.nf++] = x.second;
+    k.g = lo[0].first;
+    static int logs = 0;
+    if (logs++ < 24) { printf("select3d: personaje %d, pies:", cv.sys); for (int i = 0; i < k.nf; i++) printf(" 0x%02X", k.feet[i]); printf(", suelo %.2f (altura %.1f)\n", k.g, h); fflush(stdout); }
+}
 static void s3d_probe(uint32_t o, uint32_t tb) {
     float h = cv.h > 1.0f ? cv.h : 19.0f, hd[3] = {0, 0, 0}, ws[3] = {0, 0, 0}, sc[3] = {0, 0, 0};
     bool ok = s3d_bone_pos(o, tb, 0x2F, hd, sc) && s3d_bone_pos(o, tb, 0x03, ws) && s3d_valid(hd, ws, h);
     s3d_hide = true;
     if (!ok && ++s3d_ptries < 10) return;
     s3d_probed = true; s3d_hide = false;
-    if (ok) { s3d_set_want(hd, ws, h); memcpy(s3d_known[cv.sys].v, s3d_want, sizeof s3d_want); }
+    if (ok) { s3d_set_want(hd, ws, h); memcpy(s3d_known[cv.sys].v, s3d_want, sizeof s3d_want); s3d_feet_of(o, tb, h, s3d_known[cv.sys]); }
     static int logs = 0;
     if (logs++ < 24) { printf("select3d: personaje %d, reposo %s: cabeza (%.1f, %.1f, %.1f), cintura (%.1f, %.1f, %.1f), escalas %.1f %.1f %.1f, altura %.1f, centro y %.1f, distancia %.1f, %d cuadros\n", cv.sys,
                                ok ? "medido" : "no valido", hd[0], hd[1], hd[2], ws[0], ws[1], ws[2], sc[0], sc[1], sc[2], h, s3d_want[1], s3d_want[3], s3d_ptries + 1); fflush(stdout); }
 }
+// 3x3 part of a bone matrix (rows scaled per axis) -> unit quaternion (x, y, z, w) and the row scales; the inverse is in s3d_body
+static bool s3d_dec(const float* m, float* q, float* sc) {
+    float r[9];
+    for (int row = 0; row < 3; row++) {
+        sc[row] = sqrtf(m[4 * row] * m[4 * row] + m[4 * row + 1] * m[4 * row + 1] + m[4 * row + 2] * m[4 * row + 2]);
+        if (!std::isfinite(sc[row]) || sc[row] < 1e-6f) return false;
+        for (int col = 0; col < 3; col++) r[3 * row + col] = m[4 * row + col] / sc[row];
+    }
+    float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+    if (det < 0) for (int col = 0; col < 3; col++) r[col] = -r[col];   // mirrored bone: the flip stays in the part before the rotation
+    float tr = r[0] + r[4] + r[8];
+    if (tr > 0) { float s = sqrtf(tr + 1.0f) * 2; q[3] = 0.25f * s; q[0] = (r[5] - r[7]) / s; q[1] = (r[6] - r[2]) / s; q[2] = (r[1] - r[3]) / s; }
+    else if (r[0] > r[4] && r[0] > r[8]) { float s = sqrtf(1.0f + r[0] - r[4] - r[8]) * 2; q[3] = (r[5] - r[7]) / s; q[0] = 0.25f * s; q[1] = (r[3] + r[1]) / s; q[2] = (r[6] + r[2]) / s; }
+    else if (r[4] > r[8]) { float s = sqrtf(1.0f + r[4] - r[0] - r[8]) * 2; q[3] = (r[6] - r[2]) / s; q[0] = (r[3] + r[1]) / s; q[1] = 0.25f * s; q[2] = (r[7] + r[5]) / s; }
+    else { float s = sqrtf(1.0f + r[8] - r[0] - r[4]) * 2; q[3] = (r[1] - r[3]) / s; q[0] = (r[6] + r[2]) / s; q[1] = (r[7] + r[5]) / s; q[2] = 0.25f * s; }
+    return std::isfinite(q[0] + q[1] + q[2] + q[3]);
+}
+static uint32_t s3d_seq = 0, s3d_seq_done = 0;   // one pose edit per drawn frame (the body draw can run more than once)
 static void s3d_predraw(uint32_t o) {
     if (cv_owner() != 2) return;
+    s3d_seq++;
     uint32_t tb = s3d_mtx(o);
     bool bad = !tb || tb >= 0x10000000u;
     if (s3d_phase == 0 && !s3d_probed) {
         if (!bad) s3d_probe(o, tb);
         else { s3d_hide = true; if (++s3d_ptries >= 10) { s3d_probed = true; s3d_hide = false; } }
+    }
+}
+// body draw of the select model (0x0880CAF4, the bone matrices of this frame are already built): the fall's feet and the blend to idle
+static void s3d_body(uint32_t o) {
+    if (cv_owner() != 2 || cv.cur < 0 || o != cv_objp(cv.obj[cv.cur]) || s3d_seq == s3d_seq_done) return;
+    s3d_seq_done = s3d_seq;
+    uint32_t tb = s3d_mtx(o);
+    if (!tb || tb >= 0x10000000u) return;
+    uint32_t hdr = psp_l32(o + 0x14), nb = hdr && hdr < 0x10000000u ? psp_l32(hdr + 8) : 0;
+    if (s3d_phase == 1) {   // falling: the feet never go under the floor, and in the last part of the fall they are taken down onto it
+        s3d_off = 0.0f;
+        auto kn = s3d_known.find(cv.sys);
+        if (kn != s3d_known.end() && kn->second.nf && nb) {
+            float fy = -1e9f, p[3];
+            for (int i = 0; i < kn->second.nf; i++) if (s3d_bone_pos(o, tb, kn->second.feet[i], p)) fy = std::max(fy, p[1]);
+            if (fy > -1e8f) {
+                float g = kn->second.g, w = 0.0f;
+                if (s3d_fall_len > 8 && s3d_fall_f0 >= 0) { float t = ((float)(s3d_frame - s3d_fall_f0) - 0.55f * s3d_fall_len) / (0.45f * s3d_fall_len); t = std::min(1.0f, std::max(0.0f, t)); w = t * t * (3.0f - 2.0f * t); }
+                s3d_off = fy > g ? g - fy : w * (g - fy);
+                uint32_t bt2 = psp_l32(hdr + 0x50);
+                if (bt2 && bt2 < 0x08000000u) bt2 += hdr;
+                if (s3d_off != 0.0f && bt2) for (uint32_t b = 0; b < nb && b < 256; b++) for (uint32_t h2 = 0; h2 < 128; h2 += 64) {   // every bone id of the model (physics bones have ids above the count)
+                    uint32_t bid = psp_l16(bt2 + 0xA0 * b + 0xA) & 0xFFu, a = tb + bid * 128 + h2 + 4 * 13; if (bid < 0x77) cv_wf(a, cv_rf(a) + s3d_off);
+                }
+            }
+        }
         return;
     }
-    if (bad) return;
     if (s3d_blend <= 0 || !s3d_nb) return;
-    uint32_t hdr = psp_l32(o + 0x14), nb = hdr && hdr < 0x10000000u ? psp_l32(hdr + 8) : 0;
     if (o != s3d_snap_o || hdr != s3d_snap_md) {
         static int logs = 0;
         if (logs++ < 20) printf("select3d: mezcla de pose descartada: el objeto cambio (0x%08X -> 0x%08X, modelo 0x%08X -> 0x%08X)\n", s3d_snap_o, o, s3d_snap_md, hdr);
@@ -249,12 +315,101 @@ static void s3d_predraw(uint32_t o) {
     }
     float t = 1.0f - (float)s3d_blend / (float)(S3D_BLEND + 1);
     t = t * t * (3.0f - 2.0f * t);
-    for (int i = 0; i < s3d_nb; i++) {
-        if ((uint32_t)s3d_bone[i] >= nb) continue;
-        for (int k = 0; k < 16; k++) {
-            uint32_t a = tb + (uint32_t)s3d_bone[i] * 128 + 4 * (uint32_t)k;
-            cv_wf(a, s3d_pose[i][k] + (cv_rf(a) - s3d_pose[i][k]) * t);
+    // by the skeleton: each bone's rotation blends as a quaternion and its joint keeps its offset from the parent (blended in the parent's
+    // frame), so bones keep their length and the parts stay attached; the root's position blends in a line
+    uint32_t bt = psp_l32(hdr + 0x50);
+    if (bt && bt < 0x08000000u) bt += hdr;
+    if (!bt || nb > 256) { s3d_blend--; return; }
+    static float R0[256][9], R1[256][9], RB[256][9], P0[256][3], P1[256][3], PB[256][3];
+    static bool okb[256];
+    int snap_of[256], par[256], st[64], sp = 0;
+    for (int i = 0; i < 256; i++) snap_of[i] = -1;
+    for (int i = 0; i < s3d_nb; i++) snap_of[s3d_bone[i] & 255] = i;
+    auto rot = [](const float* q, float* r) {
+        float x = q[0], y = q[1], z = q[2], w = q[3];
+        r[0] = 1 - 2 * (y * y + z * z); r[1] = 2 * (x * y + z * w); r[2] = 2 * (x * z - y * w);
+        r[3] = 2 * (x * y - z * w); r[4] = 1 - 2 * (x * x + z * z); r[5] = 2 * (y * z + x * w);
+        r[6] = 2 * (x * z + y * w); r[7] = 2 * (y * z - x * w); r[8] = 1 - 2 * (x * x + y * y);
+    };
+    auto mul = [](const float* v, const float* r, float* o) { for (int c = 0; c < 3; c++) o[c] = v[0] * r[c] + v[1] * r[3 + c] + v[2] * r[6 + c]; };
+    auto mulT = [](const float* v, const float* r, float* o) { for (int c = 0; c < 3; c++) o[c] = v[0] * r[3 * c] + v[1] * r[3 * c + 1] + v[2] * r[3 * c + 2]; };
+    // a bone matrix is X * R: R the rotation, X whatever comes before it (the model box scale, a bone's own scale or shear, as in hair);
+    // R blends as a quaternion, X in a line, so both ends of the blend are exact for any matrix
+    auto nrm = [](const float* m, float* o) { for (int r = 0; r < 3; r++) { float n = sqrtf(m[4 * r] * m[4 * r] + m[4 * r + 1] * m[4 * r + 1] + m[4 * r + 2] * m[4 * r + 2]); n = n > 1e-9f ? 1.0f / n : 0.0f; for (int c = 0; c < 3; c++) o[3 * r + c] = m[4 * r + c] * n; } };
+    auto unit = [](float* q) { float n = 1.0f / sqrtf(std::max(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3], 1e-12f)); for (int k = 0; k < 4; k++) q[k] *= n; };
+    // out 4x4 rows 0..2 = lerp(M0 R0^T, M1 R1^T) Rb; returns the row-normalized result in nb9
+    auto build = [&](const float* m0, const float* r0, const float* m1, const float* r1, const float* rb, float* o12, float* nb9) {
+        for (int r = 0; r < 3; r++) {
+            float x[3];
+            for (int c = 0; c < 3; c++) {
+                float a0 = m0[4 * r] * r0[3 * c] + m0[4 * r + 1] * r0[3 * c + 1] + m0[4 * r + 2] * r0[3 * c + 2];
+                float a1 = m1[4 * r] * r1[3 * c] + m1[4 * r + 1] * r1[3 * c + 1] + m1[4 * r + 2] * r1[3 * c + 2];
+                x[c] = a0 + (a1 - a0) * t;
+            }
+            for (int c = 0; c < 3; c++) o12[4 * r + c] = x[0] * rb[c] + x[1] * rb[3 + c] + x[2] * rb[6 + c];
         }
+        nrm(o12, nb9);
+    };
+    for (uint32_t i = 0; i < nb; i++) {
+        uint32_t rec = bt + 0xA0 * i;
+        int id = psp_l16(rec + 0xA) & 0xFF;
+        par[i] = sp > 0 ? st[sp - 1] : -1;
+        if (sp < 64) st[sp] = (int)i;
+        int ind = (int)psp_l32(rec + 4) & 0xFFFF;
+        if (ind > 0) { sp -= ind; if (sp < -1) sp = i == 0 ? -1 : 0; }
+        sp++;
+        if (sp < 0) sp = 0;
+        okb[i] = false;
+        int k0 = id < 0x77 ? snap_of[id] : -1;   // by id: physics bones (hair, cloth) have ids above the bone count
+        if (k0 < 0) continue;
+        uint32_t a = tb + (uint32_t)id * 128;
+        const float* m0 = s3d_pose[k0];
+        float m[16], q0[4], q1[4], s0[3], s1[3], bp[3], v[3], n0[9], n1[9], o[12], nn[9];
+        for (int k = 0; k < 16; k++) m[k] = cv_rf(a + 4 * (uint32_t)k);
+        for (int k = 0; k < 3; k++) bp[k] = cv_rf(rec + 0x10 + 4 * (uint32_t)k);
+        if (!s3d_dec(m0, q0, s0) || !s3d_dec(m, q1, s1)) continue;
+        unit(q0); unit(q1);
+        rot(q0, R0[i]); rot(q1, R1[i]);
+        nrm(m0, n0); nrm(m, n1);
+        mul(bp, n0, v); for (int k = 0; k < 3; k++) P0[i][k] = v[k] + m0[12 + k];
+        mul(bp, n1, v); for (int k = 0; k < 3; k++) P1[i][k] = v[k] + m[12 + k];
+        if (q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3] < 0) for (int k = 0; k < 4; k++) q1[k] = -q1[k];
+        float q[4];
+        for (int k = 0; k < 4; k++) q[k] = q0[k] + (q1[k] - q0[k]) * t;
+        unit(q);
+        rot(q, RB[i]);
+        int pr = par[i];
+        if (pr >= 0 && okb[pr]) {
+            float d0[3], d1[3], w0[3], w1[3], d[3];
+            for (int k = 0; k < 3; k++) { w0[k] = P0[i][k] - P0[pr][k]; w1[k] = P1[i][k] - P1[pr][k]; }
+            mulT(w0, R0[pr], d0); mulT(w1, R1[pr], d1);
+            for (int k = 0; k < 3; k++) d[k] = d0[k] + (d1[k] - d0[k]) * t;
+            mul(d, RB[pr], v);
+            for (int k = 0; k < 3; k++) PB[i][k] = PB[pr][k] + v[k];
+        } else for (int k = 0; k < 3; k++) PB[i][k] = P0[i][k] + (P1[i][k] - P0[i][k]) * t;
+        okb[i] = true;
+        build(m0, R0[i], m, R1[i], RB[i], o, nn);
+        mul(bp, nn, v);
+        for (int row = 0; row < 3; row++) for (int col = 0; col < 3; col++) cv_wf(a + 4 * (uint32_t)(4 * row + col), o[4 * row + col]);
+        for (int col = 0; col < 3; col++) cv_wf(a + 4 * (uint32_t)(12 + col), PB[i][col] - v[col]);
+        // second matrix of the bone (the other end of its weighted vertices): its own rotation blended, held at the same joint
+        float m2[16], p0[4], p1[4], t0[3], t1[3], ra[9], rb[9], rm[9], qa[3], qb[3];
+        for (int k = 0; k < 16; k++) m2[k] = cv_rf(a + 64 + 4 * (uint32_t)k);
+        if (!s3d_dec(m0 + 16, p0, t0) || !s3d_dec(m2, p1, t1)) continue;
+        unit(p0); unit(p1);
+        rot(p0, ra); rot(p1, rb);
+        nrm(m0 + 16, n0); nrm(m2, n1);
+        mul(bp, n0, v); for (int k = 0; k < 3; k++) qa[k] = v[k] + m0[28 + k] - P0[i][k];
+        mul(bp, n1, v); for (int k = 0; k < 3; k++) qb[k] = v[k] + m2[12 + k] - P1[i][k];
+        if (p0[0] * p1[0] + p0[1] * p1[1] + p0[2] * p1[2] + p0[3] * p1[3] < 0) for (int k = 0; k < 4; k++) p1[k] = -p1[k];
+        float pq[4];
+        for (int k = 0; k < 4; k++) pq[k] = p0[k] + (p1[k] - p0[k]) * t;
+        unit(pq);
+        rot(pq, rm);
+        build(m0 + 16, ra, m2, rb, rm, o, nn);
+        mul(bp, nn, v);
+        for (int row = 0; row < 3; row++) for (int col = 0; col < 3; col++) cv_wf(a + 64 + 4 * (uint32_t)(4 * row + col), o[4 * row + col]);
+        for (int col = 0; col < 3; col++) cv_wf(a + 64 + 4 * (uint32_t)(12 + col), PB[i][col] + qa[col] + (qb[col] - qa[col]) * t - v[col]);
     }
     s3d_blend--;
 }
@@ -549,14 +704,16 @@ static void s3d_tick(const Ctx& c) {
     if (o && s3d_phase == 0 && s3d_probed) {
         if (s3d_recolour) { s3d_recolour = false; s3d_phase = 2; s3d_land_f = s3d_frame; }
         else if (s3d_fall && s3d_fmode != 2 && !gen_run) {
-            psp_s32(o + 0x738 + 4 * 6, s3d_fall); mpm_call(c, 0x089B14C8u, o, 6, 1); s3d_phase = 1;
+            psp_s32(o + 0x738 + 4 * 6, s3d_fall); mpm_call(c, 0x089B14C8u, o, 6, 1); s3d_phase = 1; s3d_fall_f0 = s3d_frame; s3d_off = 0.0f;
             cv_wf(o + 0xCA0, s3d_base_sp * s3d_fspeed);
         } else { s3d_phase = 2; s3d_land_f = s3d_frame; if (s3d_sw.sys == cv.sys) { s3d_sw.landed = s3d_frame; s3d_report(", sin caida"); } }
     }
     if (o && s3d_phase == 1 && psp_l32(o + 0xC94) == 0) {   // landed: idle, blended from the last pose
         s3d_phase = 2; s3d_land_f = s3d_frame;
+        if (s3d_fall_f0 >= 0 && s3d_frame - s3d_fall_f0 > 8) s3d_fall_len = s3d_frame - s3d_fall_f0;   // the same file and speed for everyone: the next falls know when the landing comes
         cv_wf(o + 0xCA0, s3d_base_sp);
         s3d_snap(o);
+        s3d_off = 0.0f;
         if (psp_l32(o + 0x738 + 4 * 7)) mpm_call(c, 0x089B14C8u, o, 7, 2);
         s3d_blend = S3D_BLEND;
         if (s3d_sw.sys == cv.sys) { s3d_sw.landed = s3d_frame; s3d_report(""); }

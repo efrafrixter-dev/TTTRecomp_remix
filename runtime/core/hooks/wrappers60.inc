@@ -1805,7 +1805,7 @@ static void psp_wrap_body(uint32_t dir, Ctx& c, void (*orig)(Ctx&)) {
     if ((dir == 0x088F5600u || dir == 0x088F70ECu || dir == 0x088F7080u) && tfm_wrap(dir, c, orig)) return;
     if (dir == 0x088C95BCu) { ch_a_create(c, orig); return; }
     if (dir == 0x088C958Cu || dir == 0x088C9534u) { ch_a_loader(dir, c, orig); return; }
-    if (dir == 0x0880CAF4u) { LipSave ls; lip_begin(c, ls); if (!cel_wrap(c, orig)) orig(c); lip_end(ls); return; }
+    if (dir == 0x0880CAF4u) { s3d_body(c.r[4]); LipSave ls; lip_begin(c, ls); if (!cel_wrap(c, orig)) orig(c); lip_end(ls); return; }
     if (dir == 0x088B5CD0u) { cel_aura_draw(c, orig); return; }
     if (dir == 0x0880BB28u) { wat_wrap(c, orig); return; }
     if (dir == 0x08817100u || dir == 0x08817390u || dir == 0x088134ECu) {   // network: phases, errors and stopwatch of the WLAN session
