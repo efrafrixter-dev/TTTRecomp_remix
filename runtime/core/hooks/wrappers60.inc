@@ -1742,7 +1742,7 @@ static void psp_wrap_body(uint32_t dir, Ctx& c, void (*orig)(Ctx&)) {
     if (dir == 0x089D1B94u && (c.r[31] == 0x089D8C14u || c.r[31] == 0x089D8CCCu) && sz_boost_inst(c, orig)) return;   // power-up title: SZ BBoost notice
     if (dir == 0x089D1B94u) { if (!s3d_inst(c) && !m3d_inst(c)) orig(c); return; }
     if (dir == 0x089FF8C8u) { s3d_form_draw(c, orig); return; }
-    if (dir == 0x089F9F34u) { s3d_grid_draw(c, orig); return; }
+    if (dir == 0x089F9F34u) { if (!sm_draw(c)) s3d_grid_draw(c, orig); return; }
     if (dir == 0x08832448u && c.r[31] == 0x088532CCu) { sub_depth(c, orig); return; }
     if (dir == 0x08834518u && c.r[31] == 0x088532F0u) { sub_text(c, orig); return; }
     if (dir == 0x088404D8u && c.r[31] == 0x089F8D08u && s3d_pair(c, orig)) return;

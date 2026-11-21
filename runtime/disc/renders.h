@@ -1052,6 +1052,46 @@ static std::shared_ptr<gr::Img> tw_mid_orig(int s) {
     if (b->psp) for (auto& p : m->px) { uint32_t a = (p >> 24) * 2; p = (p & 0x00FFFFFFu) | ((a > 255 ? 255 : a) << 24); }
     return m;
 }
+// item 81 (BT3 style select): the small render cell of a menu number, the generated one first (Graphics > Renders), else the atlas cell
+bool psp_sel_small(int menu, std::vector<uint32_t>& px, int* w, int* h) {
+    static std::mutex m;
+    static std::vector<uint8_t> d;
+    static std::vector<ags::State> st;
+    static std::map<int, uint32_t> page_tex;
+    static bool ready = false;
+    {
+        std::lock_guard<std::mutex> g(m);
+        if (!ready) {
+            ready = true;
+            std::string f = disc_dir + "/cache/roster/en_017_char_renders_small.ags";
+            if (!is_file(f)) f = link_real(disc_dir + "/Shared/" + psp_shared_rel("Menus/char_select/char_select_en.pak") + "/1_interface/017_char_renders_small.ags");
+            if (!read_file(f, d, true) || !ags::parse(d, st)) { printf("sel81: no se pudo leer %s\n", f.c_str()); st.clear(); }
+            for (uint32_t id = 1; id <= tex_reg.size(); id++) {
+                std::string k = lower(tex_reg[id - 1].pak) + "|" + lower(link_real(tex_reg[id - 1].fpath));
+                if (k.find("char_renders_small") == std::string::npos || k.find(".rhg") == std::string::npos) continue;
+                int pg = atoi(tex_reg[id - 1].name.c_str());
+                if (!page_tex.count(pg)) page_tex[pg] = id;
+            }
+            printf("sel81: renders pequenos, %d estados, %d paginas\n", (int)st.size(), (int)page_tex.size());
+        }
+    }
+    int s = gr::sys_of_menu(menu), q = gr::on_q();
+    if (s >= 0 && q > 0 && gr::have(s, 0, q))
+        if (auto g = gr::file_img(q, s, 0, gr::K_SMALL, false)) { px = g->px; *w = g->w; *h = g->h; return true; }
+    if (menu < 0 || menu >= (int)st.size()) return false;
+    int tx, tw, th; float r[4];
+    if (!ags::rect(d, st[menu], &tx, &tw, &th, r) || tw <= 0 || th <= 0) return false;
+    auto it = page_tex.find(tx + 1);
+    if (it == page_tex.end()) return false;
+    TexPng* b = tex_load(it->second);
+    if (!b || !b->w) return false;
+    gr::Img o; o.w = b->w; o.h = b->h; o.px = b->px;
+    float sx = (float)b->w / tw, sy = (float)b->h / th;
+    gr::Img c = gr::resample(o, r[0] * sx, r[1] * sy, r[2] * sx, r[3] * sy, std::max(1, (int)((r[2] - r[0]) * sx)), std::max(1, (int)((r[3] - r[1]) * sy)));
+    if (b->psp) for (auto& p : c.px) { uint32_t a = (p >> 24) * 2; p = (p & 0x00FFFFFFu) | ((a > 255 ? 255 : a) << 24); }
+    px = c.px; *w = c.w; *h = c.h;
+    return true;
+}
 static std::shared_ptr<gr::Img> tw_compose(uint32_t id, int* nserved) {
     const int S = 4, W = 256 * S, H = 192 * S, D = 56 * S;
     auto out = std::make_shared<gr::Img>();
@@ -1440,5 +1480,15 @@ static bool mq_serve(uint32_t id, int* w, int* h, const uint32_t** px) {
     *w = m->w; *h = m->h; *px = m->px.data();
     static std::atomic<int> logs{0};
     if (logs++ < 16) { printf("render: servido %s como render de mapa generado (tipo %d, mapa %d, %dx%d)\n", t.fpath.c_str(), o.kind, o.map, m->w, m->h); fflush(stdout); }
+    return true;
+}
+
+// item 81: the generated big render of a map (Graphics > Renders of maps), empty when there is none
+bool psp_sel_map_big(int map, std::vector<uint32_t>& px, int* w, int* h) {
+    int q = gm::on_q();
+    std::string k = q > 0 ? gm::key_of(map) : std::string();
+    gr::Img m;
+    if (k.empty() || !gr::load(gm::file(q, k, "big"), m) || !m.w) return false;
+    px = m.px; *w = m.w; *h = m.h;
     return true;
 }
