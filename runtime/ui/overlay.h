@@ -716,6 +716,7 @@ static std::vector<OvRow> ov_page() {
         r.push_back(ov_act("Map renders", "Renders de mapas", ov_queued[1] ? q1 : q0, [] { char nb[16]; snprintf(nb, sizeof(nb), "%d", gw_env("TTT_GEN_MAP_RENDERS_GO", 0) + 1); _putenv_s("TTT_GEN_MAP_RENDERS_GO", nb); ov_queued[1] = true; }, g.genm != 0));
         r.push_back(ov_head("Select screens", "Pantallas de selección"));
         r.push_back(ov_gw("3D model in select", "Modelo 3D en la selección", &g.sel3d, OFF(), true));
+        if (g.sel3d) r.push_back(ov_gw("3D view entrance", "Entrada en la vista 3D", &g.selentry, lv({{"Fall", "Caída"}, {"Teleport", "Teletransporte"}})));
         r.push_back(ov_gw("3D map in select", "Mapa 3D en la selección", &g.map3d, OFF()));
         r.push_back(ov_gw("Names as text", "Nombres como texto", &g.textn, OFF()));
     } else {

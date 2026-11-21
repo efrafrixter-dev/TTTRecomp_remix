@@ -611,6 +611,115 @@ static void tn_fill(const Ctx& c) {
     psp_tn_char_names(v);
 }
 // select voice (item 79): one of the two Character Reference samples of the character chosen, when its colour selector opens
+// item 80: teleport entrance (TTT_SEL3D_ENTRY=1): the game's own vanish lines module, run in the select view. Manager 0x08A7CE68
+// (update 0x088D673C, post 0x088D6810, draw 0x088D6E8C), request 0x088D4CE0(entity slot, kind 0 vanish / 1 appear), work
+// [0x08B40854] (0 outside battle: the port's own work is put there only during its calls), texture common entry 0x266
+static int s3d_entry() { const char* e = getenv("TTT_SEL3D_ENTRY"); return e && *e ? atoi(e) : 0; }
+static uint32_t tp_w = 0;
+static uint64_t tp_t = 0;
+static bool tp_failed = false;
+static uint32_t tp_g(uint32_t a) { return a && a < 0x10000000u ? psp_l32(a) : 0; }
+static bool tp_ensure(const Ctx& c) {
+    if (tp_w || tp_failed) return tp_w != 0;
+    uint32_t pk = tp_g(0x08A7F280u) ? tp_g(tp_g(0x08A7F280u)) : 0;
+    if (!pk) { tp_failed = true; printf("tp: sin paquete comun de batalla: no hay efecto\n"); fflush(stdout); return false; }
+    uint32_t m = psp_reserve(0x60 + 0x50 + 0x4B00 + 0x48 + 64);
+    if (!m) { tp_failed = true; printf("tp: sin memoria para el efecto\n"); fflush(stdout); return false; }
+    m = (m + 15) & ~15u;
+    memset(psp_p(m), 0, 0x60 + 0x50 + 0x4B00 + 0x48);
+    uint32_t rq = m + 0x60, ln = rq + 0x50, tx = ln + 0x4B00;
+    psp_s32(m, rq); psp_s32(m + 4, ln); psp_s32(m + 0x50, tx);
+    uint32_t data = mpm_call(c, 0x0887BB40u, 0x266);
+    mpm_call(c, 0x08902C10u, tx, data);
+    tp_w = m;
+    printf("tp: efecto del juego listo: trabajo 0x%08X, textura entrada 0x266 en 0x%08X, %u texturas\n", m, data, psp_l32(tx + 0x40)); fflush(stdout);
+    return true;
+}
+// the module finds its object in the entity table 0x08B61178 (8 slots); the viewer's objects are put in slots 6 and 7 only during its calls
+struct TpAlias { uint32_t o = 0; int id = -1; };
+static TpAlias tp_al[2];
+static uint32_t tp_alive(int k) { return tp_al[k].o && cv_objp(tp_al[k].id) == tp_al[k].o ? tp_al[k].o : 0; }
+static uint32_t tp_call(const Ctx& c, uint32_t fn, uint32_t a0 = 0, uint32_t a1 = 0) {
+    uint32_t keep = psp_l32(0x08B40854u), k6 = psp_l32(0x08B61178u + 24), k7 = psp_l32(0x08B61178u + 28);
+    psp_s32(0x08B40854u, tp_w); psp_s32(0x08B61178u + 24, tp_alive(0)); psp_s32(0x08B61178u + 28, tp_alive(1));
+    uint32_t r = mpm_call(c, fn, a0, a1);
+    psp_s32(0x08B40854u, keep); psp_s32(0x08B61178u + 24, k6); psp_s32(0x08B61178u + 28, k7);
+    return r;
+}
+static int tp_age[4] = {0, 0, 0, 0}, tp_hid = -1, tp_show = -1;
+static uint32_t tp_hid_o = 0;
+static uint64_t tp_hid_t = 0;
+static void tp_slots(char* b, size_t n) {
+    uint32_t rq = psp_l32(tp_w);
+    int k = 0;
+    for (uint32_t i = 0; i < 4; i++) k += snprintf(b + k, n - (size_t)k, "%s[%u 0x%X %u %u]", i ? " " : "", psp_l32(rq + 0x14 * i), psp_l32(rq + 0x14 * i + 0x10), psp_l32(rq + 0x14 * i + 4), psp_l32(rq + 0x14 * i + 8));
+}
+static void tp_req(const Ctx& c, int vid, int kind) {
+    uint32_t o = cv_objp(vid);
+    if (!o || !tp_ensure(c)) { static int logs = 0; if (logs++ < 10) { printf("tp: peticion sin objeto (visor %d)\n", vid); fflush(stdout); } return; }
+    int k = tp_al[0].o == o ? 0 : tp_al[1].o == o ? 1 : -1;
+    if (k < 0) {
+        uint32_t rq = psp_l32(tp_w);
+        bool used[2] = {false, false};
+        for (uint32_t i = 0; i < 4; i++) { uint32_t q = psp_l32(rq + 0x14 * i); if (psp_l32(rq + 0x14 * i + 0x10) && (q == 6 || q == 7)) used[q - 6] = true; }
+        k = !used[0] ? 0 : !used[1] ? 1 : (tp_al[0].o == tp_hid_o ? 1 : 0);
+        tp_al[k].o = o; tp_al[k].id = vid;
+    }
+    int id = 6 + k;
+    uint32_t r = tp_call(c, 0x088D4CE0u, (uint32_t)id, (uint32_t)kind);
+    tp_t = psp_time_us();
+    if (kind == 1) {
+        if (tp_show < 0) { const char* e = getenv("TTT_SEL3D_TP_SHOW"); tp_show = e && *e ? atoi(e) : 2; }
+        if (r && tp_show > 0) { tp_hid = id; tp_hid_o = o; tp_hid_t = tp_t; s3d_hide = true; }
+    }
+    static int logs = 0;
+    if (logs++ < 40) {
+        char b[160]; tp_slots(b, sizeof b);
+        printf("tp: peticion %s, objeto %d (visor %d), personaje %d, resultado %u, ranuras %s, lineas %u, pausa 0x%08X\n", kind ? "aparecer" : "desaparecer", id, vid, cv.sys, r, b, psp_l32(tp_w + 8), psp_l32(0x08B48A20u + 0x5C60));
+        fflush(stdout);
+    }
+}
+static void tp_tick(const Ctx& c) {
+    if (!tp_w) return;
+    uint32_t rq = psp_l32(tp_w), busy = psp_l32(tp_w + 8);
+    for (uint32_t i = 0; i < 4; i++) {
+        uint32_t f = psp_l32(rq + 0x14 * i + 0x10), id = psp_l32(rq + 0x14 * i);
+        if (f && (id < 6 || id > 7 || !tp_alive((int)id - 6) || tp_age[i] > 12)) {
+            static int logs = 0;
+            if (logs++ < 20) { printf("tp: ranura %u liberada (objeto %u, banderas 0x%X, %d pasos, entidad 0x%08X)\n", i, id, f, tp_age[i], id == 6 || id == 7 ? tp_alive((int)id - 6) : 0); fflush(stdout); }
+            psp_s32(rq + 0x14 * i + 0x10, 0); f = 0;
+        }
+        if (!f) tp_age[i] = 0;
+        busy |= f;
+    }
+    uint64_t now = psp_time_us();
+    if (tp_hid >= 0) {   // the new model stays hidden until its appear sequence reaches the body lines (TTT_SEL3D_TP_SHOW steps)
+        bool show = now - tp_hid_t > 400000 || !cv.visible || cv.cur < 0 || cv_objp(cv.obj[cv.cur]) != tp_hid_o;
+        bool found = false;
+        for (uint32_t i = 0; i < 4; i++) if ((int)psp_l32(rq + 0x14 * i) == tp_hid && (psp_l32(rq + 0x14 * i + 0x10) & 2)) { found = true; if ((int)psp_l32(rq + 0x14 * i + 8) >= tp_show) show = true; }
+        if (!found) show = true;
+        if (show) { if (cv.visible && cv.cur >= 0 && cv_objp(cv.obj[cv.cur]) == tp_hid_o) s3d_hide = false; tp_hid = -1; }
+    }
+    if (!busy) return;
+    for (int g = 0; now - tp_t >= 33333 && g < 2; g++) {
+        tp_t += 33333;
+        tp_call(c, 0x088D673Cu);
+        if (tp_g(0x08A7D7D8u)) tp_call(c, 0x088D6810u);
+        for (uint32_t i = 0; i < 4; i++) if (psp_l32(rq + 0x14 * i + 0x10)) tp_age[i]++;
+    }
+    if (now - tp_t > 100000) tp_t = now;
+}
+static void tp_draw(Ctx& c) {
+    static uint32_t was = 0;
+    uint32_t nl = tp_w ? psp_l32(tp_w + 8) : 0;
+    if (nl && !was) { static int logs = 0; if (logs++ < 40) { printf("tp: dibujo del juego: %u lineas\n", nl); fflush(stdout); } }
+    was = nl;
+    if (!nl) return;
+    uint32_t list = mpm_call(c, 0x08838054u, 0);
+    tp_call(c, 0x088D6E8Cu);
+    if (list) { mpm_call(c, 0x08838120u, list); mpm_call(c, 0x08837F54u, 0x08B4E690u, list, 0); }
+}
+
 static int sv_on() { static int v = -1, n = 0; if ((n++ & 255) == 0 || v < 0) { const char* e = getenv("TTT_SEL_VOICE"); v = e && *e ? atoi(e) : 1; } return v; }
 static int sv_sample_id(int s) {   // the list id of the Character Reference samples: a renamed original keeps its new id
     for (auto& r : roster::defs().renames) if (r.sysid == s && r.newid >= 0 && r.newid != s) return r.newid < 161 ? r.newid : -1;
@@ -631,6 +740,7 @@ static void sv_tick(const Ctx& c) {
     if (cr_on() && cv_owner() != 1 && (cr_vplay || cr_vkill || !cr_vname.empty())) cr_vtick(c);
 }
 static void s3d_tick(const Ctx& c) {
+    tp_tick(c);
     s3d_frame++;
     tn_fill(c);
     sv_tick(c);
@@ -689,6 +799,7 @@ static void s3d_tick(const Ctx& c) {
         s3d_report(s3d_sw.landed < 0 ? ", cambiado antes de aterrizar" : "");
         s3d_sw.sys = s; s3d_sw.n = s3d_n; s3d_sw.f0 = s3d_frame; s3d_sw.t0 = psp_time_us();
         s3d_hit = false; s3d_req = s3d_sw.t0;
+        if (!gen_run && s3d_entry() == 1 && cv.visible && cv.cur >= 0 && s3d_phase == 2) tp_req(c, cv.obj[cv.cur], 0);
         cv_show_sys(c, s, s3d_colour, w2, -1); s3d_phase = 0; s3d_yaw = S3D_YAW;
     }
     if (s >= 0 && s == cv.sys && s3d_colour == cv.colour && cv.dmg != 2) cv.dmg = want_dmg == 1 && cv.has1 ? 1 : 0;   // level 1: same model, its textures
@@ -700,13 +811,14 @@ static void s3d_tick(const Ctx& c) {
         s3d_base_sp = cv_rf(o + 0xCA0);
         cv.framed = false; s3d_blend = 0; s3d_phase = 0; s3d_probed = false; s3d_ptries = 0; s3d_land_f = -1;
         s3d_newobj = true;
+        tp_hid = -1;
     }
     if (o && s3d_phase == 0 && s3d_probed) {
         if (s3d_recolour) { s3d_recolour = false; s3d_phase = 2; s3d_land_f = s3d_frame; }
-        else if (s3d_fall && s3d_fmode != 2 && !gen_run) {
+        else if (s3d_fall && s3d_fmode != 2 && !gen_run && s3d_entry() != 1) {
             psp_s32(o + 0x738 + 4 * 6, s3d_fall); mpm_call(c, 0x089B14C8u, o, 6, 1); s3d_phase = 1; s3d_fall_f0 = s3d_frame; s3d_off = 0.0f;
             cv_wf(o + 0xCA0, s3d_base_sp * s3d_fspeed);
-        } else { s3d_phase = 2; s3d_land_f = s3d_frame; if (s3d_sw.sys == cv.sys) { s3d_sw.landed = s3d_frame; s3d_report(", sin caida"); } }
+        } else { s3d_phase = 2; s3d_land_f = s3d_frame; if (!gen_run && s3d_entry() == 1) tp_req(c, cv.obj[cv.cur], 1); if (s3d_sw.sys == cv.sys) { s3d_sw.landed = s3d_frame; s3d_report(", sin caida"); } }
     }
     if (o && s3d_phase == 1 && psp_l32(o + 0xC94) == 0) {   // landed: idle, blended from the last pose
         s3d_phase = 2; s3d_land_f = s3d_frame;
@@ -829,6 +941,7 @@ static void s3d_draw(Ctx& c) {
     cel_force_now = cap && gen_env("TTT_GEN_CEL", 0) > 0;
     cv_scene(c, o, eye, ctr);
     cel_force_now = false;
+    if (!cap) tp_draw(c);
     if (cap) { s3d_mark_list(c, 0x00EC0000u, 0); gen_state = 3; gen_tries = 0; }
     s3d_mark_list(c, 0x00E90000u, 0);
     if (gen_run) return;
