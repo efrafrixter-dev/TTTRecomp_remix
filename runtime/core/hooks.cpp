@@ -26,6 +26,7 @@
 #include "core/hooks/char_ref.inc"
 #include "core/hooks/select3d.inc"
 #include "core/hooks/room3d.inc"
+#include "core/hooks/select_menu.inc"
 #include "core/hooks/map3d.inc"
 #include "core/hooks/bt3_cam.inc"
 #include "core/hooks/wrappers60.inc"

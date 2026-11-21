@@ -10,7 +10,7 @@ static const int GW_MSAA[] = {0, 0, 2, 4, 8, 4}, GW_FXAA[] = {0, 1, 0, 0, 0, 1};
 static const int GW_CURSOR_S[] = {0, 1, 3, 5, 10};
 static const int GW_WATER_V[] = {0, 2, 1, 3};   // TTT_WATER: 0 off, 1 full (the old on), 2 BT3, 3 enhanced (BT3 + water shader)
 
-struct GwValues { int size, scale, filter, sharpness, outline, lod, gpu, vsync, fps, floating, bars, charge, discord, names, soft, cel, bolts, water, smooth, bloom, vfxmap, olmode, msaa, texf, mblur, lip, blink, dyncol, sel3d, genr, genq, skipcr, trwait, blastend, glow, camsil, bt3fx, atm, sun, cursor, hud, barsback, bt3cam, trwheel, map3d, genm, textn, celglow, sndw, selv, storm, bubbles, haze, rain, wet, chg2, smotion, impact, fpsc, selentry; };
+struct GwValues { int size, scale, filter, sharpness, outline, lod, gpu, vsync, fps, floating, bars, charge, discord, names, soft, cel, bolts, water, smooth, bloom, vfxmap, olmode, msaa, texf, mblur, lip, blink, dyncol, sel3d, genr, genq, skipcr, trwait, blastend, glow, camsil, bt3fx, atm, sun, cursor, hud, barsback, bt3cam, trwheel, map3d, genm, textn, celglow, sndw, selv, storm, bubbles, haze, rain, wet, chg2, smotion, impact, fpsc, selentry, selstyle; };
 static GwValues gw_v, gw_start, gw_prev;
 static bool gw_loaded = false;   // gw_start read once (this window or the settings menu)
 static int gw_prev_fit = 2; static bool gw_prev_fullscreen = false;
@@ -85,6 +85,7 @@ static void gw_read() {
     gw_v.sndw = gw_env("TTT_SND_WATER", 1) != 0;
     gw_v.selv = gw_env("TTT_SEL_VOICE", 1) != 0;
     gw_v.selentry = gw_env("TTT_SEL3D_ENTRY", 0) == 1 ? 1 : 0;
+    gw_v.selstyle = gw_env("TTT_SEL_STYLE", 0) == 1 ? 1 : 0;
     gw_v.storm = gw_env("TTT_BT3_STORM", 1) != 0;
     gw_v.bubbles = gw_env("TTT_BT3_BUBBLES", 1) != 0;
     gw_v.haze = gw_env("TTT_BT3_HAZE", 1) != 0;
@@ -164,6 +165,8 @@ static void gw_save() {
     _putenv_s("TTT_SEL_VOICE", gw_v.selv ? "1" : "0");
     fprintf(f, "TTT_SEL3D_ENTRY=%d\n", gw_v.selentry);
     _putenv_s("TTT_SEL3D_ENTRY", gw_v.selentry ? "1" : "0");
+    fprintf(f, "TTT_SEL_STYLE=%d\n", gw_v.selstyle);
+    _putenv_s("TTT_SEL_STYLE", gw_v.selstyle ? "1" : "0");
     fprintf(f, "TTT_BT3_STORM=%d\nTTT_BT3_BUBBLES=%d\nTTT_BT3_HAZE=%d\n", gw_v.storm, gw_v.bubbles, gw_v.haze);
     _putenv_s("TTT_BT3_STORM", gw_v.storm ? "1" : "0"); _putenv_s("TTT_BT3_BUBBLES", gw_v.bubbles ? "1" : "0"); _putenv_s("TTT_BT3_HAZE", gw_v.haze ? "1" : "0");
     fprintf(f, "TTT_RAIN=%d\nTTT_WET=%d\nTTT_CHARGE2=%d\n", gw_v.rain, gw_v.wet, gw_v.chg2);

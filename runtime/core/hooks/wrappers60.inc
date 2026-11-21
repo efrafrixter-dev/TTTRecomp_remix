@@ -1735,6 +1735,7 @@ static void psp_wrap_body(uint32_t dir, Ctx& c, void (*orig)(Ctx&)) {
     if (au_wrap(dir, c, orig)) return;
     if ((dir == 0x089BFDF4u || dir == 0x0883EE74u || dir == 0x08830274u || dir == 0x089C34ACu || (dir >= 0x08A81DC0u && dir <= 0x08A836F0u)) && cr_menu_wrap(dir, c, orig)) return;
     if ((dir == 0x08A06BB8u || dir == 0x089FC394u || dir == 0x089FCC08u) && cs_wrap(dir, c, orig)) return;
+    if (dir == 0x08A0A0A0u) { sm_cursor(c, orig); return; }
     if (dir == 0x0881A1A0u) { s3d_a1a0_vb = psp_l32(0x08A78E14u); wt_tick(); ch_tick(c); mpm_frame(c); cr_frame(c); s3d_tick(c); m3d_tick(c); rm_tick(c); vw_tick(c); ip_trace(c); }
     if (dir == 0x0880BBF4u) { cv_draw3d(c); s3d_draw(c); m3d_draw(c); rm_draw(c); orig(c); return; }
     if (dir == 0x089D1B94u && c.r[31] == 0x089F228Cu && bh_tw_band(c, orig)) return;   // technique window band (BT3 HUD)

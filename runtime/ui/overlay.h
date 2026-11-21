@@ -715,6 +715,7 @@ static std::vector<OvRow> ov_page() {
         r.push_back(ov_gw("Map renders from 3D", "Renders de mapas desde el 3D", &g.genm, OFF()));
         r.push_back(ov_act("Map renders", "Renders de mapas", ov_queued[1] ? q1 : q0, [] { char nb[16]; snprintf(nb, sizeof(nb), "%d", gw_env("TTT_GEN_MAP_RENDERS_GO", 0) + 1); _putenv_s("TTT_GEN_MAP_RENDERS_GO", nb); ov_queued[1] = true; }, g.genm != 0));
         r.push_back(ov_head("Select screens", "Pantallas de selección"));
+        r.push_back(ov_gw("Character select style", "Estilo de la selección de personajes", &g.selstyle, lv({{"Original", "Original"}, {"BT3", "BT3"}})));
         r.push_back(ov_gw("3D model in select", "Modelo 3D en la selección", &g.sel3d, OFF(), true));
         if (g.sel3d) r.push_back(ov_gw("3D view entrance", "Entrada en la vista 3D", &g.selentry, lv({{"Fall", "Caída"}, {"Teleport", "Teletransporte"}})));
         r.push_back(ov_gw("3D map in select", "Mapa 3D en la selección", &g.map3d, OFF()));
@@ -791,6 +792,7 @@ static const OvDesc OV_DESC[] = {
     {"Map renders", "Creates again every map picture the next time you enter the map select.", "Vuelve a crear todas las imágenes de mapas la próxima vez que entres a la selección de mapa."},
     {"3D model in select", "Shows the 3D model of the character in the character select.", "Muestra el modelo 3D del personaje en la selección de personajes."},
     {"3D map in select", "Shows the 3D map in the map select.", "Muestra el mapa 3D en la selección de mapa."},
+    {"Character select style", "Layout of the character select. BT3: both sides on one screen.", "Diseño de la selección de personajes. BT3: ambos lados en una sola pantalla."},
     {"Names as text", "Draws the names in the select screens as text instead of pictures.", "Dibuja los nombres en las pantallas de selección como texto en lugar de imágenes."},
     {"GPU rendering", "Draws the game with the graphics card. Needed by most effects.", "Dibuja el juego con la tarjeta gráfica. La necesitan la mayoría de los efectos."},
     {"Vertical sync", "Syncs the image with the monitor to avoid tearing. Not recommended: it still shows problems.", "Sincroniza la imagen con el monitor para evitar cortes. No recomendado: aún presenta problemas."},

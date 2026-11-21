@@ -994,8 +994,9 @@ static void mpm_sel_open(const Ctx& c, uint32_t o, int row) {
     mpm_call(c, psp_l32(vt + 0xCC), pg + (uint32_t)(int16_t)psp_l16(vt + 0xC8), 0, o);
 }
 
+static bool sm_busy();
 static void mpm_sel_own(const Ctx& c, uint32_t w) {
-    if (!mpm_own_on()) return;
+    if (!mpm_own_on() || sm_busy()) return;
     static uint32_t lw = 0;
     static int logs = 0, pend[4];
     if (w != lw) { lw = w; logs = 0; for (int p = 0; p < 4; p++) pend[p] = 0; }

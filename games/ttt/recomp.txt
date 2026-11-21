@@ -89,6 +89,7 @@
 0x08A642A8                        # sceGuSetMatrix: BT3 field of view with the BT3 camera
 0x0898F22C                        # fighter special camera priority: 0 while the BT3 camera ignores a combo cut
 0x08A06BB8 0x089FC394 0x089FCC08  # character select colours: input, rows by colour, selector draw
+0x08A0A0A0                        # free battle select cursor dispatcher: item 81 select menus
 0x0883A998 0x0881AA74             # volumes: category set (voices own categories 1 and 2), SFX scale (effects byte)
 0x089BFDF4                        # allocation: main menu list one word larger (Character Reference item)
 0x08A03C0C 0x08A03C9C 0x08A07170 0x08858764  # map select: constructor, destructor (tail arrays), availability; battle map index (tournament)
