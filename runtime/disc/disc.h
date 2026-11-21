@@ -1720,6 +1720,22 @@ bool psp_bt3_snd_pcm(int id, const int16_t** pcm, int* n, int* rate) {
     return true;
 }
 
+// the battle common bank's teleport sound for the select 3D view (sound 0x20 of bank 0), from the assets (or a mod), read on first use
+bool psp_tp_snd_pcm(const int16_t** pcm, int* n, int* rate) {
+    static std::mutex m;
+    static SfxWav w;
+    static int st = 0;
+    std::lock_guard<std::mutex> g(m);
+    if (!st) {
+        w.fpath = disc_dir + "/Packfile/Battle_UI/sfx_battle/1_sfx.vagp/7_Movement_Flight_Teleportation/32_teleportation.wav";
+        st = sfx_load(w) ? 1 : -1;
+        printf("sonido: teletransporte de la seleccion %s (%s)\n", st > 0 ? "cargado" : "no encontrado", w.fpath.c_str()); fflush(stdout);
+    }
+    if (st < 0 || !w.n) return false;
+    *pcm = w.pcm.data(); *n = w.n; *rate = w.rate;
+    return true;
+}
+
 static SfxWav* sfx_wav(int id) {
     if (id < 1 || id > (int)sfx_reg.size()) return nullptr;
     SfxWav& w = sfx_reg[id - 1];

@@ -646,6 +646,12 @@ static uint32_t tp_call(const Ctx& c, uint32_t fn, uint32_t a0 = 0, uint32_t a1 
     psp_s32(0x08B40854u, keep); psp_s32(0x08B61178u + 24, k6); psp_s32(0x08B61178u + 28, k7);
     return r;
 }
+void psp_snd_tp(float gain);
+static void tp_sound() {
+    static float v = -1.0f;
+    if (v < 0.0f) { const char* e = getenv("TTT_SEL3D_TP_VOL"); v = e && *e ? (float)atof(e) : 0.2f; }
+    psp_snd_tp(v);
+}
 static int tp_age[4] = {0, 0, 0, 0}, tp_hid = -1, tp_show = -1;
 static uint32_t tp_hid_o = 0;
 static uint64_t tp_hid_t = 0;
@@ -668,6 +674,9 @@ static void tp_req(const Ctx& c, int vid, int kind) {
     int id = 6 + k;
     uint32_t r = tp_call(c, 0x088D4CE0u, (uint32_t)id, (uint32_t)kind);
     tp_t = psp_time_us();
+    static bool gone = false;   // one sound per change: at the vanish, or at the appear when nothing vanished
+    if (r && (kind == 0 || !gone)) tp_sound();
+    if (r) gone = kind == 0;
     if (kind == 1) {
         if (tp_show < 0) { const char* e = getenv("TTT_SEL3D_TP_SHOW"); tp_show = e && *e ? atoi(e) : 2; }
         if (r && tp_show > 0) { tp_hid = id; tp_hid_o = o; tp_hid_t = tp_t; s3d_hide = true; }

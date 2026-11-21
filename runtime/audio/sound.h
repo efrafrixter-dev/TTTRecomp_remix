@@ -500,6 +500,14 @@ void psp_snd_bt3(int id, int vol, int pan) {
     std::lock_guard<std::mutex> l(pv_mx);
     if (pv_list.size() < 16) pv_list.push_back(v);
 }
+bool psp_tp_snd_pcm(const int16_t** pcm, int* n, int* rate);
+void psp_snd_tp(float gain) {
+    const int16_t* p; int n, r;
+    if (gain <= 0.0f || !psp_tp_snd_pcm(&p, &n, &r)) return;
+    PortVoice v{p, n, r, 0.0, gain, gain};
+    std::lock_guard<std::mutex> l(pv_mx);
+    if (pv_list.size() < 16) pv_list.push_back(v);
+}
 static void pv_mix(int grain, int hz) {
     std::lock_guard<std::mutex> l(pv_mx);
     if (pv_list.empty()) return;
