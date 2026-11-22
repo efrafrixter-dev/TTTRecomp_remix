@@ -196,6 +196,17 @@ static void sm_ev(int k, const SmSide& o, bool up) {
         }
         return;
     }
+    if (d.st == SM_COLOR && o.st < SM_COLOR) {   // item 79: the character's voice when his colour opens, as the original
+        const RosterCell& cl = sm_cell(d.pos);
+        int sy = s3d_sys_of_menu(cl.ids[d.form < cl.n ? d.form : 0]);
+        if (sy >= 0) sv_req = sy;
+    }
+    if (d.st == SM_DONE && o.st != SM_CUSTOM) {   // Start: straight to done
+        if (o.st < SM_COLOR) a.ok = t;
+        else box(SB_COL_OUT);
+        a.out = t; a.in = -1;
+        return;
+    }
     if ((o.st == SM_GRID && d.st == SM_FORM) || (o.st == SM_FORM && d.st == SM_GRID)) { a.wipe = t; a.wforms = o.st == SM_FORM; a.on = t; a.ok = -1; a.row = a.off = -1; }
     else if (d.st == SM_COLOR && o.st < SM_COLOR) { a.ok = t; box(SB_COL_IN); }
     else if (o.st == SM_COLOR && d.st < SM_COLOR) { a.on = t; a.ok = -1; box(SB_COL_OUT); }
@@ -209,9 +220,25 @@ static void sm_input0(Ctx& c, int k) {
     uint32_t pad = 0x08B4E990u + 0x58u * (uint32_t)d.pad, rep = psp_l32(pad + 0x34), edge = psp_l32(pad + 0x30);
     bool ok = edge & psp_l32(0x08A793D4u), bk = edge & psp_l32(0x08A793D0u);
     int L = rep & 1, R = rep & 2, D = rep & 4, U = rep & 8, n = sm_cells();
+    bool sk = (edge & 0x1000) && d.st <= SM_COLOR;   // Start: the select handlers (grid 0x08A090E0, form, colour) take the fighter as he is (0x08A069F0) and jump to done
     const RosterCell* cl = &sm_cell(d.pos);
-    if (!(ok || bk || L || R || D || U)) return;
+    if (!(ok || bk || L || R || D || U || sk)) return;
     sm_show(k);
+    if (sk) {
+        if (d.st == SM_GRID && sm_random(d.pos)) {
+            int p = d.pos;
+            for (int t = 0; t < 64 && (sm_random(p) || !sm_open(p)); t++) p = sm_rand(n);
+            if (sm_random(p)) return;
+            d.pos = p;
+        }
+        if (d.st == SM_GRID) d.form = 0;
+        if (d.st != SM_COLOR) { d.col = 0; d.dmg = 0; }
+        d.foc = 0; d.cus = 0;
+        if (d.st == SM_COLOR) mpm_sfx(c, 1, 6); else mpm_sfx(c, 2, 7);
+        d.st = SM_DONE;
+        sm_write(c, k); sm_log(k, "start: listo directo");
+        return;
+    }
     switch (d.st) {
     case SM_GRID:
         if (L || R || U || D) {
