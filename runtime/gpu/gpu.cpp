@@ -23,7 +23,7 @@
 #include <memory>
 #include <set>
 
-// Software GE executor. Direct mode (sprites, triangles, points) and 3D mode:
+// Software GE executor. Direct mode (sprites, triangles, points) and 3D mode:remix
 // bone skinning, world/view/projection matrices, diffuse lighting, near clipping,
 // 16-bit z-buffer, culling and perspective texturing. Writes to guest VRAM.
 
