@@ -74,13 +74,14 @@ static void sm_probe(uint32_t o) {
 // the port writes W+0x26C+0x18*row (+0 cell id, +4 menu number, +8 form, +0xC colour); the stage select opens through the page
 // callback (W vtable +0xC8, state 5, value 4). Supported: free battle of one player (48_30) and local (24_18), one fighter per team
 enum { SM_GRID, SM_FORM, SM_COLOR, SM_CUSTOM, SM_DONE };
-struct SmSide { int row = -1, pad = 0, st = SM_GRID, pos = 0, form = 0, col = 0, dmg = 0, foc = 0, cus = 0; bool human = false; };
-struct SmMenu { bool on = false, ret = false; uint32_t w = 0, drv = 0; int last = -1, shown = 0, logs = 0, hide = 0; SmSide s[2]; };
+struct SmSide { int row = -1, pad = 0, st = SM_GRID, pos = 0, form = 0, col = 0, dmg = 0, foc = 0, cus = 0, team = 0; bool human = false; };
+// up to 4 slots (rows); seq = more than 2: one slot picks at a time in ord (his design 93.5); vis = the slot each side of the screen shows
+struct SmMenu { bool on = false, ret = false, seq = false; uint32_t w = 0, drv = 0; int last = -1, shown = 0, logs = 0, hide = 0, n = 0, act = -1, ord[4] = {0, 1, 2, 3}, vis[2] = {0, 1}; SmSide s[4]; };
 static SmMenu sm;
 // BT3 movie timings (PZS3US1 file 0x1C1: side reels 23/24, plates 31/32, main 14), in 60 Hz frames since each event
 enum { SB_NONE, SB_COL_IN, SB_COL_OUT, SB_SWAP, SB_SWAP_BACK, SB_CUS_OK, SB_CUS_IN };
 struct SmAnim { float in = -1, out = -1, row = -1, wipe = -1, on = -1, off = -1, ok = -1, box = -1; int rdir = 0, rold = 0, offi = -1, bev = 0; bool wforms = false, wait = false; };
-static SmAnim sm_an[2];
+static SmAnim sm_an[4];
 static float sm_now = 0, sm_t0 = -1;
 static bool sm_busy() { return sm.on; }
 static int sm_style() { const char* e = getenv("TTT_SEL_STYLE"); return e && *e ? atoi(e) : 0; }
@@ -143,11 +144,18 @@ static void sm_show(int k) { sm.shown = k; }
 static bool sm_turn(int k) {
     if (sm.s[k].pad != 0) return true;
     int first = -1, last = -1;
-    for (int j = 0; j < 2; j++) if (sm.s[j].pad == 0) { if (first < 0 && sm.s[j].st != SM_DONE) first = j; last = j; }
+    for (int j = 0; j < sm.n; j++) if (sm.s[j].pad == 0) { if (first < 0 && sm.s[j].st != SM_DONE) first = j; last = j; }
     return k == (first >= 0 ? first : last);
 }
 static int sm_prev0(int k) {
     for (int j = k - 1; j >= 0; j--) if (sm.s[j].pad == 0) return j;
+    return -1;
+}
+static int sm_cur() { for (int i = 0; i < sm.n; i++) if (sm.s[sm.ord[i]].st != SM_DONE) return sm.ord[i]; return -1; }
+static bool sm_act(int k) { return sm.seq ? k == sm_cur() : sm_turn(k); }
+static int sm_prev(int k) {
+    if (!sm.seq) return sm_prev0(k);
+    for (int i = 1; i < sm.n; i++) if (sm.ord[i] == k) return sm.ord[i - 1];
     return -1;
 }
 static void sm_finish(Ctx& c) {
@@ -165,7 +173,7 @@ static void sm_finish(Ctx& c) {
         if (sm_gp(q) && (int)psp_l32(q + 0x48) != -1) mpm_call(c, 0x089D161Cu, q);
     }
     psp_s32(o + 0x78, 5); psp_s32(o + 0x7C, 5); psp_s32(o + 0x8C + 4 * 5, 4);
-    printf("sel81: los dos lados listos (filas %d %d): abre la seleccion de mapa\n", sm.s[0].row, sm.s[1].row);
+    printf("sel81: %d puestos listos: abre la seleccion de mapa\n", sm.n);
     mpm_call(c, psp_l32(vt + 0xCC), pg + (uint32_t)(int16_t)psp_l16(vt + 0xC8), 0, o);
 }
 static void sm_back_out(Ctx& c) {
@@ -230,9 +238,9 @@ static void sm_input0(Ctx& c, int k) {
             if (d.st == SM_COLOR) { int nc = sm_ncol(sm_cell(d.pos).ids[d.form]); if (d.col >= nc) d.col = 0; d.dmg = 0; d.foc = 0; }
             mpm_sfx(c, 1, 6); sm_write(c, k); sm_log(k, "confirma");
         } else if (bk) {
-            int j = sm_prev0(k);
-            if (d.pad == 0 && j >= 0) { mpm_sfx(c, 1, 0); sm.s[j].st = SM_CUSTOM; sm_show(j); sm_write(c, j); sm_log(j, "vuelve"); }
-            else if (k == 0 || (d.pad == 0 && j < 0)) { mpm_sfx(c, 1, 0); sm_back_out(c); }
+            int j = sm_prev(k);
+            if (j >= 0 && (sm.seq || d.pad == 0)) { mpm_sfx(c, 1, 0); sm.s[j].st = SM_CUSTOM; sm_show(j); sm_write(c, j); sm_log(j, "vuelve"); }
+            else if (j < 0 && (sm.seq || k == 0 || d.pad == 0)) { mpm_sfx(c, 1, 0); sm_back_out(c); }
         }
         break;
     case SM_FORM:
@@ -273,20 +281,21 @@ static void sm_input0(Ctx& c, int k) {
     }
 }
 static void sm_input(Ctx& c, int k) {
-    SmSide o[2] = {sm.s[0], sm.s[1]};
+    SmSide o[4] = {sm.s[0], sm.s[1], sm.s[2], sm.s[3]};
     bool up = psp_l32(0x08B4E990u + 0x58u * (uint32_t)sm.s[k].pad + 0x34) & 8;
     sm_input0(c, k);
-    for (int j = 0; j < 2; j++) sm_ev(j, o[j], up);
+    for (int j = 0; j < sm.n; j++) sm_ev(j, o[j], up);
 }
-static bool sm_rows(uint32_t w, int* rows, int* cnt) {
-    rows[0] = rows[1] = -1; cnt[0] = cnt[1] = 0;
+static bool sm_rows(uint32_t w, int rows[2][2], int* cnt) {   // active rows per team; 1 or 2 each (1 vs 1 .. 2 vs 2)
+    cnt[0] = cnt[1] = 0;
     for (int r = 0; r < 4; r++) {
         uint32_t row = w + 0xB8 + 4 + 0x6C * r;
         if (!psp_l32(row + 0x44)) continue;
         int t = psp_l32(row + 0x40) ? 1 : 0;
-        if (!cnt[t]++) rows[t] = r;
+        if (cnt[t] < 2) rows[t][cnt[t]] = r;
+        cnt[t]++;
     }
-    return cnt[0] == 1 && cnt[1] == 1;
+    return cnt[0] >= 1 && cnt[0] <= 2 && cnt[1] >= 1 && cnt[1] <= 2;
 }
 // the game's select pages stay alive but draw nothing while the port's menu owns the screen (also their in/out animations): each page
 // gets a copy of its vtable whose draw entry (+0x68, grid page vtable 0x08A733D8 -> 0x089F9F34) is the empty 0x089F8FA0
@@ -315,27 +324,36 @@ static void sm_mask(uint32_t w, bool on) {
     }
 }
 static bool sm_begin(uint32_t w, uint32_t o) {
-    int rows[2], cnt[2];
+    int rows[2][2], cnt[2];
     if (!sm_rows(w, rows, cnt)) {
         static uint32_t lw = 0;
-        if (lw != w) { lw = w; printf("sel81: estilo BT3 sin soporte para %d contra %d todavia: seleccion original\n", cnt[0], cnt[1]); }
+        if (lw != w) { lw = w; printf("sel81: estilo BT3 sin soporte para %d contra %d: seleccion original\n", cnt[0], cnt[1]); }
         return false;
     }
     sm.on = true; sm.w = w; sm.drv = o; sm.shown = 0;
-    for (int k = 0; k < 2; k++) {
-        SmSide& d = sm.s[k];
-        int r = rows[k], pl = lmp_cfg_on ? mpm_row_player(r) : (k == 0 ? 0 : -1);
+    int n = 0, sl[2][2];
+    for (int t = 0; t < 2; t++) for (int i = 0; i < cnt[t]; i++) {
+        SmSide& d = sm.s[n];
+        int r = rows[t][i], pl = lmp_cfg_on ? mpm_row_player(r) : (n == 0 ? 0 : -1);
         if (d.row != r || !sm.ret) d = SmSide();
-        d.row = r; d.human = pl >= 0; d.pad = pl >= 0 ? pl : 0;
+        d.row = r; d.team = t; d.human = pl >= 0; d.pad = pl >= 0 ? pl : 0;
         uint32_t rec = sm_rec(r);
-        if (!sm.ret) {
-            uint32_t cell = psp_l32(rec);
-            d.pos = cell == 99 ? 0 : sm_pos_of_cell(cell);
-            d.st = SM_GRID;
-        } else d.st = SM_DONE;
+        if (!sm.ret) { uint32_t cell = psp_l32(rec); d.pos = cell == 99 ? 0 : sm_pos_of_cell(cell); d.st = SM_GRID; }
+        else d.st = SM_DONE;
+        sl[t][i] = n++;
     }
-    if (sm.ret) for (int k = 1; k >= 0; k--) if (sm.s[k].pad == 0 || sm.s[k].human) { sm.s[k].st = SM_CUSTOM; if (sm.s[k].pad == 0) break; }
-    for (int k = 0; k < 2; k++) {
+    sm.n = n; sm.seq = n > 2;
+    // order: J1, then its partner when human (same reel), else J1, COM1, partner, COM2 (93.5)
+    int q = 0;
+    if (cnt[0] == 2 && sm.s[sl[0][1]].human) { sm.ord[q++] = sl[0][0]; sm.ord[q++] = sl[0][1]; for (int i = 0; i < cnt[1]; i++) sm.ord[q++] = sl[1][i]; }
+    else for (int i = 0; i < 2; i++) for (int t = 0; t < 2; t++) if (i < cnt[t]) sm.ord[q++] = sl[t][i];
+    if (sm.ret) {
+        if (sm.seq) sm.s[sm.ord[n - 1]].st = SM_CUSTOM;
+        else for (int k = 1; k >= 0; k--) if (sm.s[k].pad == 0 || sm.s[k].human) { sm.s[k].st = SM_CUSTOM; if (sm.s[k].pad == 0) break; }
+        for (int t = 0; t < 2; t++) for (int i = 0; i < n; i++) if (sm.s[sm.ord[i]].team == t) sm.vis[t] = sm.ord[i];
+    } else for (int t = 0; t < 2; t++) sm.vis[t] = sl[t][0];
+    sm.act = sm.seq ? sm_cur() : -1;
+    for (int k = 0; k < n; k++) {
         SmAnim& a = sm_an[k];
         a = SmAnim();
         if (sm.s[k].st != SM_DONE) { a.in = sm_now; a.on = sm_now; }
@@ -345,8 +363,23 @@ static bool sm_begin(uint32_t w, uint32_t o) {
     sm.ret = false;
     sm.hide = 8;
     if (sm_rng == 0x9E3779B9u) sm_rng ^= (uint32_t)psp_time_us();
-    printf("sel81: estilo BT3 activo en W 0x%08X: lado 0 fila %d (%s), lado 1 fila %d (%s)\n", w, sm.s[0].row, sm.s[0].human ? "humano" : "COM", sm.s[1].row, sm.s[1].human ? "humano" : "COM");
+    char b[160]; int m = 0;
+    for (int i = 0; i < n; i++) { const SmSide& d = sm.s[sm.ord[i]]; m += snprintf(b + m, sizeof b - m, " %s fila %d equipo %d (%s)", i ? "," : "", d.row, d.team, d.human ? "humano" : "COM"); }
+    printf("sel81: estilo BT3 activo en W 0x%08X, %d contra %d, orden:%s\n", w, cnt[0], cnt[1], b);
     return true;
+}
+// seq: the next slot takes over; on the same side the reel stays (it passes to him), on a side whose reel left it comes in again
+static void sm_handover() {
+    int b = sm_cur(), a = sm.act;
+    if (!sm.seq || b == sm.act) return;
+    sm.act = b;
+    if (b < 0) return;
+    int t = sm.s[b].team, pv = sm.vis[t];
+    SmAnim& an = sm_an[b];
+    if (a >= 0 && sm.s[a].team == t && sm.s[a].st == SM_DONE) { an.in = -1; an.out = -1; an.on = sm_now; }
+    else if (pv != b && pv >= 0 && sm.s[pv].st == SM_DONE) { an.in = sm_now; an.out = -1; an.on = sm_now; }
+    sm.vis[t] = b;
+    if (sm.logs++ < 300) printf("sel81: turno de la fila %d (lado %s)\n", sm.s[b].row, t ? "abajo" : "arriba");
 }
 
 static void sm_cursor(Ctx& c, void (*orig)(Ctx&)) {
@@ -360,10 +393,13 @@ static void sm_cursor(Ctx& c, void (*orig)(Ctx&)) {
                 for (int i = 1; i < 6; i++) { uint32_t q = psp_l32(sm.w + 0x84 + 4 * i); if (sm_gp(q) && (int)psp_l32(q + 0x48) != -1 && (int)psp_l32(q + 0x48) != 2) mpm_call(c, 0x089D161Cu, q); }
             }
             int k0 = -1;
-            bool turn[2] = {sm_turn(0), sm_turn(1)};   // decided before any input: a confirm that ends J1's turn is not read again by the COM side
-            for (int k = 0; k < 2 && sm.on; k++) if (turn[k]) { if (k0 < 0) k0 = k; sm_input(c, k); }
-            if (sm.on && sm.s[0].st == SM_DONE && sm.s[1].st == SM_DONE) sm_finish(c);
-            else if (sm.on && k0 >= 0 && !sm.s[k0].human && sm.shown != k0) sm_show(k0);
+            bool turn[4];   // decided before any input: a confirm that ends J1's turn is not read again by the next slot
+            for (int k = 0; k < sm.n; k++) turn[k] = sm_act(k);
+            for (int k = 0; k < sm.n && sm.on; k++) if (turn[k]) { if (k0 < 0) k0 = k; sm_input(c, k); }
+            bool all = sm.on;
+            for (int k = 0; k < sm.n; k++) if (sm.s[k].st != SM_DONE) all = false;
+            if (all) sm_finish(c);
+            else if (sm.on) { sm_handover(); if (k0 >= 0 && !sm.s[k0].human && sm.shown != k0) sm_show(k0); }
             if (sm_probe_on()) sm_probe(o);
         }
         return;
@@ -371,7 +407,7 @@ static void sm_cursor(Ctx& c, void (*orig)(Ctx&)) {
     orig(c);
     if (sm_probe_on()) sm_probe(o);
     if (sm_gp(w) && !sm.on && o == psp_l32(w + 0x70)) {
-        int rows[2], cnt[2];
+        int rows[2][2], cnt[2];
         sm_mask(w, sm_style() == 1 && sm_vt_ok(w) && sm_rows(w, rows, cnt));
     }
     if (!sm_gp(w) || sm.on || sm_style() != 1 || !sm_vt_ok(w)) return;
@@ -393,7 +429,7 @@ static void sm_cursor(Ctx& c, void (*orig)(Ctx&)) {
             return;
         }
     }
-    if (now == 1 && sm_begin(w, o)) { for (int k = 0; k < 2; k++) sm_write(c, k); sm_show(0); }
+    if (now == 1 && sm_begin(w, o)) { for (int k = 0; k < sm.n; k++) sm_write(c, k); sm_show(0); }
 }
 
 // ---- drawing (GE sprites in the menu's 2D list, in place of the grid page's draw 0x089F9F34): pieces games/ttt/select_bt3, renders, texts
@@ -463,9 +499,58 @@ static const BhTex* sm_get(const std::string& key, std::function<bool(std::vecto
 }
 static bool sm_file(const std::string& f, std::vector<uint32_t>& px, int* w, int* h) { return !f.empty() && sz_png(f, px, w, h); }
 // games/ttt/select_bt3/origen.txt: pieces read from the user's own assets (never shipped). One line per layer, same name = more layers:
-// name = lienzo W H | name = <path under assets/Shared> [x y w h] [en dx dy] [tam W H] [color r g b]
+// name = lienzo W H [tam W H] [espejo] (whole piece: composed, then Lanczos as PIL, then mirrored)
+// name = <path under assets/Shared> [x y w h] [en dx dy] [tam W H] [color r g b] (one layer; its tam is bilinear)
 struct SmLayer { std::string path; int cx = 0, cy = 0, cw = 0, ch = 0, dx = 0, dy = 0, sw = 0, sh = 0; float mul[3] = {1, 1, 1}; bool col = false; };
-struct SmOrig { int W = 0, H = 0; std::vector<SmLayer> ly; };
+struct SmOrig { int W = 0, H = 0, sw = 0, sh = 0; bool mir = false; std::vector<SmLayer> ly; };
+// Lanczos-3 resample exactly as PIL's LANCZOS: RGBA premultiplied to 8 bits, horizontal pass then vertical, 22-bit fixed weights,
+// 8-bit rounding between passes, support widened when shrinking
+static void sm_lz_axis(const std::vector<uint8_t>& in, int w, int h, int on, bool horiz, std::vector<uint8_t>& out) {
+    int n = horiz ? w : h, m = horiz ? h : w, ow = horiz ? on : w, oh = horiz ? h : on;
+    double sc = (double)n / on, fs = sc > 1 ? sc : 1, sup = 3 * fs;
+    out.assign((size_t)ow * oh * 4, 0);
+    std::vector<int> k;
+    std::vector<double> wd;
+    for (int i = 0; i < on; i++) {
+        double c = (i + 0.5) * sc;
+        int a = std::max(0, (int)(c - sup + 0.5)), b = std::min(n, (int)(c + sup + 0.5));
+        wd.assign(b - a, 0.0);
+        double tot = 0;
+        for (int j = a; j < b; j++) {
+            double x = (j - c + 0.5) / fs, v;
+            if (x == 0) v = 1; else if (x <= -3 || x >= 3) v = 0; else { double px = 3.14159265358979323846 * x; v = sin(px) / px * (sin(px / 3) / (px / 3)); }
+            wd[j - a] = v; tot += v;
+        }
+        k.assign(b - a, 0);
+        for (int j = 0; j < b - a; j++) { double v = tot != 0 ? wd[j] / tot : 0; k[j] = (int)(v * (1 << 22) + (v < 0 ? -0.5 : 0.5)); }
+        for (int r = 0; r < m; r++) {
+            int64_t acc[4] = {1 << 21, 1 << 21, 1 << 21, 1 << 21};
+            for (int j = a; j < b; j++) {
+                const uint8_t* p = &in[((size_t)(horiz ? r * w + j : j * w + r)) * 4];
+                for (int ch = 0; ch < 4; ch++) acc[ch] += (int64_t)p[ch] * k[j - a];
+            }
+            uint8_t* q = &out[((size_t)(horiz ? r * ow + i : i * ow + r)) * 4];
+            for (int ch = 0; ch < 4; ch++) { int64_t v = acc[ch] >> 22; q[ch] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+        }
+    }
+}
+static void sm_lanczos(const std::vector<uint32_t>& px, int w, int h, int ow, int oh, std::vector<uint32_t>& out) {
+    std::vector<uint8_t> f((size_t)w * h * 4), t;
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        uint32_t a = px[i] >> 24;
+        for (int c = 0; c < 3; c++) { uint32_t v = (px[i] >> (8 * c) & 255) * a + 128; f[i * 4 + c] = (uint8_t)((v + (v >> 8)) >> 8); }
+        f[i * 4 + 3] = (uint8_t)a;
+    }
+    if (ow != w) { sm_lz_axis(f, w, h, ow, true, t); f.swap(t); }
+    if (oh != h) { sm_lz_axis(f, ow, h, oh, false, t); f.swap(t); }
+    out.assign((size_t)ow * oh, 0);
+    for (size_t i = 0; i < (size_t)ow * oh; i++) {
+        uint32_t a = f[i * 4 + 3], r = a << 24;
+        for (int c = 0; c < 3; c++) { uint32_t v = f[i * 4 + c]; if (a && a != 255) { v = 255 * v / a; if (v > 255) v = 255; } r |= v << (8 * c); }
+        out[i] = r;
+    }
+}
+
 static const std::map<std::string, SmOrig>& sm_origins() {
     static std::map<std::string, SmOrig> m;
     static bool done = false;
@@ -488,7 +573,15 @@ static const std::map<std::string, SmOrig>& sm_origins() {
         if (k.size() != 1 || t.empty()) continue;
         SmOrig& o = m[k[0]];
         auto num = [&](size_t i) { return i < t.size() ? atof(t[i].c_str()) : 0.0; };
-        if (t[0] == "lienzo") { o.W = (int)num(1); o.H = (int)num(2); continue; }
+        if (t[0] == "lienzo") {
+            o.W = (int)num(1); o.H = (int)num(2);
+            for (size_t i = 3; i < t.size(); i++) {
+                if (t[i] == "tam") { o.sw = (int)num(i + 1); o.sh = (int)num(i + 2); i += 2; }
+                else if (t[i] == "espejo") o.mir = true;
+                else bad++;
+            }
+            continue;
+        }
         SmLayer y;
         y.path = t[0];
         size_t i = 1;
@@ -528,7 +621,14 @@ static bool sm_layer(const SmLayer& y, std::vector<uint32_t>& px, int* w, int* h
     *w = ow; *h = oh;
     return true;
 }
+static bool sm_orig_comp(const SmOrig& o, std::vector<uint32_t>& px, int* w, int* h);
 static bool sm_orig_png(const SmOrig& o, std::vector<uint32_t>& px, int* w, int* h) {
+    if (!sm_orig_comp(o, px, w, h)) return false;
+    if (o.sw > 0 && o.sh > 0 && (o.sw != *w || o.sh != *h)) { std::vector<uint32_t> t; sm_lanczos(px, *w, *h, o.sw, o.sh, t); px.swap(t); *w = o.sw; *h = o.sh; }
+    if (o.mir) for (int y = 0; y < *h; y++) std::reverse(px.begin() + (size_t)y * *w, px.begin() + (size_t)(y + 1) * *w);
+    return true;
+}
+static bool sm_orig_comp(const SmOrig& o, std::vector<uint32_t>& px, int* w, int* h) {
     if (o.ly.empty()) return false;
     if (o.ly.size() == 1 && !o.W && !o.ly[0].dx && !o.ly[0].dy) return sm_layer(o.ly[0], px, w, h);
     std::vector<std::pair<std::vector<uint32_t>, std::pair<int, int>>> L;
@@ -562,7 +662,25 @@ static const BhTex* sm_piece(const char* name) {
     return sm_get(k, [n = std::string(name)](std::vector<uint32_t>& px, int* w, int* h) {
         auto it = sm_origins().find(n);
         if (it != sm_origins().end()) {
-            if (sm_orig_png(it->second, px, w, h)) return true;
+            if (sm_orig_png(it->second, px, w, h)) {
+                if (sm_probe_on()) {   // TTT_SEL_PROBE: the piece from the game against the PNG of the same name, if it is still there
+                    std::vector<uint32_t> q; int qw = 0, qh = 0;
+                    if (!sm_file("../../games/ttt/select_bt3/" + n + ".png", q, &qw, &qh)) printf("sel81: origen %s %dx%d (sin PNG para comparar)\n", n.c_str(), *w, *h);
+                    else if (qw != *w || qh != *h) printf("sel81: origen %s %dx%d, el PNG es %dx%d\n", n.c_str(), *w, *h, qw, qh);
+                    else {
+                        int dif = 0, mx = 0;
+                        for (size_t i = 0; i < q.size(); i++) {
+                            uint32_t a = px[i], b = q[i];
+                            if ((a >> 24) == 0 && (b >> 24) == 0) continue;
+                            int d = 0;
+                            for (int c = 0; c < 32; c += 8) d = std::max(d, abs((int)(a >> c & 255) - (int)(b >> c & 255)));
+                            if (d) { dif++; mx = std::max(mx, d); }
+                        }
+                        printf("sel81: origen %s %dx%d: %s (%d pixeles distintos, max %d)\n", n.c_str(), *w, *h, dif ? "distinto" : "igual", dif, mx);
+                    }
+                }
+                return true;
+            }
             printf("sel81: falta la pieza original %s (%s)\n", n.c_str(), it->second.ly.empty() ? "" : it->second.ly[0].path.c_str());
         }
         std::string f = "../../games/ttt/select_bt3/" + n + ".png";
@@ -694,14 +812,14 @@ static float sm_ent(float t0, float len) { return sm_t0 < 0 ? 1.0f : sm_cl((sm_n
 static void sm_side_render(int k, uint32_t dvb) {   // big render of the side over the map, in its half; fades in on change (BT3 face +0.075 a frame)
     SmSide& d = sm.s[k];
     const RosterCell& cl = sm_cell(d.pos);
-    int f = d.form < cl.n ? d.form : 0, m = cl.ids[f];
-    bool top = k == 0;
+    int f = d.form < cl.n ? d.form : 0, m = cl.ids[f], sd = d.team;
+    bool top = sd == 0;
     if (sm_random(d.pos) || (sm_t0 >= 0 && sm_now - sm_t0 < 14)) return;
     int col = d.st >= SM_COLOR ? d.col + (d.dmg == 2 ? 64 : 0) : 0, key = m * 256 + col;
     const BhTex* b = sm_big(m, col);
-    if (key != sm_akey[k]) { sm_akey[k] = key; sm_alpha[k] = 0; }
+    if (key != sm_akey[sd]) { sm_akey[sd] = key; sm_alpha[sd] = 0; }
     if (!b) return;
-    sm_alpha[k] = std::min(1.0f, sm_alpha[k] + 0.075f * (float)dvb);
+    sm_alpha[sd] = std::min(1.0f, sm_alpha[sd] + 0.075f * (float)dvb);
     float sl = (1.0f - sm_ent(14, 15)) * 240.0f * (top ? -1.0f : 1.0f);
     float hh = SM_RY1 - SM_RY0, ww = hh * b->ow / (float)b->oh, cx = (top ? 120.0f : 360.0f) + sl;
     float x0 = cx - ww / 2, x1 = cx + ww / 2, lo = top ? 0.0f : 241.0f, hi = top ? 239.0f : 480.0f;
@@ -710,7 +828,7 @@ static void sm_side_render(int k, uint32_t dvb) {   // big render of the side ov
     if (x1 > hi) { u1 -= (x1 - hi) * k0; x1 = hi; }
     if (x1 <= x0) return;
     if (!top) { float t = u0; u0 = (float)b->ow - u1; u1 = (float)b->ow - t; std::swap(u0, u1); }
-    bh_quad(b, u0, u1, 0, (float)b->oh, x0, x1, SM_RY0, SM_RY1, sm_a(sm_alpha[k]));
+    bh_quad(b, u0, u1, 0, (float)b->oh, x0, x1, SM_RY0, SM_RY1, sm_a(sm_alpha[sd]));
 }
 // chip scale of the BT3 chip sprite: fl_on_start 1.0 -> 1.2 in 4 frames, fl_on_loop 1.2 -> 1.1 -> 1.2 every 50, fl_off_start 1.16 -> 1.0,
 // fl_ok chip 1.2 -> 1.1 -> 1.2 and cursor 1.2 -> 1.0 -> 1.2 in 10 frames, then held
@@ -809,10 +927,9 @@ static void sm_side_draw(const Ctx& c, int k) {
     SmAnim& a = sm_an[k];
     const RosterCell& cl = sm_cell(d.pos);
     int f = d.form < cl.n ? d.form : 0, m = cl.ids[f], n = sm_cells(), l = sm_lang();
-    bool top = k == 0, rnd = sm_random(d.pos);
+    bool top = d.team == 0, rnd = sm_random(d.pos);
     float dir = top ? -1.0f : 1.0f;
-    bool solo = (sm.s[0].human || sm.s[1].human) && !sm.s[1].human;   // one pad: the COM reel waits while J1 picks
-    bool waiting = !top && solo && sm.s[0].st != SM_DONE;
+    bool waiting = d.st != SM_DONE && !sm_act(k);   // a slot whose turn has not come: reel off, no cursor
     if (a.wait && !waiting) a.on = sm_now;
     a.wait = waiting;
     // name and form plates (main movie: plates in 8 frames from 14, texts in 7 from 22; form in yellow, inside the plate)
@@ -907,9 +1024,9 @@ static bool sm_draw(const Ctx& c) {
         if (a > sa) { float cw = t->oh * sa; u0 = (t->ow - cw) / 2; u1 = u0 + cw; } else { float chh = t->ow / sa; v0 = (t->oh - chh) / 2; v1 = v0 + chh; }
         bh_quad(t, u0, u1, v0, v1, 0, 480, 0, SM_BAR);
     }
-    for (int k = 0; k < 2; k++) sm_side_render(k, dvb);
+    for (int sd = 0; sd < 2; sd++) sm_side_render(sm.vis[sd], dvb);
     if (const BhTex* wt = sm_white()) bh_quad(wt, 0, 8, 0, 8, 239, 241, 0, SM_BAR, 0xFF000000u);   // dividing line between the sides
-    for (int k = 0; k < 2; k++) sm_side_draw(c, k);
+    for (int sd = 0; sd < 2; sd++) sm_side_draw(c, sm.vis[sd]);
     bh_end();
     return true;
 }
