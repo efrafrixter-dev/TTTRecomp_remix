@@ -6615,6 +6615,7 @@ bool psp_disc_blink(uint32_t idx) {
 int psp_cr_map() { return disc_ready && cr_map_index != (size_t)-1 ? (int)cr_map_index : -1; }
 int psp_col_count(int s) { return col_ready && s >= 0 && s < roster::ALL ? col_n[s] : 0; }
 // first enabled mod (priority order) that has the file
+std::string psp_shared_file(const std::string& rel) { return link_real(disc_dir + "/Shared/" + psp_shared_rel(rel)); }   // a Shared asset of the user's tree, links resolved
 std::string psp_cr_file(const std::string& rel) {
     std::error_code ec;
     for (auto& m : mod_active) {

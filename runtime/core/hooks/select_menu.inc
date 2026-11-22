@@ -77,6 +77,11 @@ enum { SM_GRID, SM_FORM, SM_COLOR, SM_CUSTOM, SM_DONE };
 struct SmSide { int row = -1, pad = 0, st = SM_GRID, pos = 0, form = 0, col = 0, dmg = 0, foc = 0, cus = 0; bool human = false; };
 struct SmMenu { bool on = false, ret = false; uint32_t w = 0, drv = 0; int last = -1, shown = 0, logs = 0, hide = 0; SmSide s[2]; };
 static SmMenu sm;
+// BT3 movie timings (PZS3US1 file 0x1C1: side reels 23/24, plates 31/32, main 14), in 60 Hz frames since each event
+enum { SB_NONE, SB_COL_IN, SB_COL_OUT, SB_SWAP, SB_SWAP_BACK, SB_CUS_OK, SB_CUS_IN };
+struct SmAnim { float in = -1, out = -1, row = -1, wipe = -1, on = -1, off = -1, ok = -1, box = -1; int rdir = 0, rold = 0, offi = -1, bev = 0; bool wforms = false, wait = false; };
+static SmAnim sm_an[2];
+static float sm_now = 0, sm_t0 = -1;
 static bool sm_busy() { return sm.on; }
 static int sm_style() { const char* e = getenv("TTT_SEL_STYLE"); return e && *e ? atoi(e) : 0; }
 static uint32_t sm_rng = 0x9E3779B9u;
@@ -166,10 +171,32 @@ static void sm_finish(Ctx& c) {
 static void sm_back_out(Ctx& c) {
     uint32_t o = sm.drv, pg = psp_l32(o + 0x12C), vt = sm_gp(pg) ? psp_l32(pg + 0x40) : 0;
     sm.on = false;
-    printf("sel81: atras desde J1: vuelve como el original\n");
+    psp_s32(o + 0xEC + 4 * 5, 0);   // 0x08A8D6CC: back from state 1 opens the game room when [cursor+0xEC+4*5] == 1 (the port skips it)
+    printf("sel81: atras desde J1: vuelve a la pantalla de equipos\n");
     if (vt) mpm_call(c, psp_l32(vt + 0xCC), pg + (uint32_t)(int16_t)psp_l16(vt + 0xC8), 1, o);
 }
-static void sm_input(Ctx& c, int k) {
+static bool sm_forms(const SmSide& d) { const RosterCell& cl = sm_cell(d.pos); return d.st >= SM_FORM && cl.n > 1 && !sm_random(d.pos); }
+static void sm_ev(int k, const SmSide& o, bool up) {
+    SmSide& d = sm.s[k];
+    SmAnim& a = sm_an[k];
+    float t = sm_now;
+    auto box = [&](int e) { a.bev = e; a.box = t; };
+    if (o.st == d.st) {
+        if ((d.st == SM_GRID && o.pos != d.pos) || (d.st == SM_FORM && o.form != d.form)) {
+            a.offi = d.st == SM_GRID ? o.pos % 7 : o.form; a.off = t; a.on = t; a.ok = -1;
+            if (d.st == SM_GRID && o.pos / 7 != d.pos / 7) { a.row = t; a.rdir = up ? -1 : 1; a.rold = o.pos / 7 * 7; }
+        }
+        return;
+    }
+    if ((o.st == SM_GRID && d.st == SM_FORM) || (o.st == SM_FORM && d.st == SM_GRID)) { a.wipe = t; a.wforms = o.st == SM_FORM; a.on = t; a.ok = -1; a.row = a.off = -1; }
+    else if (d.st == SM_COLOR && o.st < SM_COLOR) { a.ok = t; box(SB_COL_IN); }
+    else if (o.st == SM_COLOR && d.st < SM_COLOR) { a.on = t; a.ok = -1; box(SB_COL_OUT); }
+    else if (o.st == SM_COLOR && d.st == SM_CUSTOM) box(SB_SWAP);
+    else if (o.st == SM_CUSTOM && d.st == SM_COLOR) box(SB_SWAP_BACK);
+    else if (o.st == SM_CUSTOM && d.st == SM_DONE) { box(SB_CUS_OK); a.out = t; a.in = -1; }
+    else if (o.st == SM_DONE && d.st == SM_CUSTOM) { box(SB_CUS_IN); a.in = t; a.out = -1; }
+}
+static void sm_input0(Ctx& c, int k) {
     SmSide& d = sm.s[k];
     uint32_t pad = 0x08B4E990u + 0x58u * (uint32_t)d.pad, rep = psp_l32(pad + 0x34), edge = psp_l32(pad + 0x30);
     bool ok = edge & psp_l32(0x08A793D4u), bk = edge & psp_l32(0x08A793D0u);
@@ -245,16 +272,51 @@ static void sm_input(Ctx& c, int k) {
         break;
     }
 }
-static bool sm_begin(uint32_t w, uint32_t o) {
-    int rows[2] = {-1, -1}, cnt[2] = {0, 0};
-    uint32_t b = w + 0xB8;
+static void sm_input(Ctx& c, int k) {
+    SmSide o[2] = {sm.s[0], sm.s[1]};
+    bool up = psp_l32(0x08B4E990u + 0x58u * (uint32_t)sm.s[k].pad + 0x34) & 8;
+    sm_input0(c, k);
+    for (int j = 0; j < 2; j++) sm_ev(j, o[j], up);
+}
+static bool sm_rows(uint32_t w, int* rows, int* cnt) {
+    rows[0] = rows[1] = -1; cnt[0] = cnt[1] = 0;
     for (int r = 0; r < 4; r++) {
-        uint32_t row = b + 4 + 0x6C * r;
+        uint32_t row = w + 0xB8 + 4 + 0x6C * r;
         if (!psp_l32(row + 0x44)) continue;
         int t = psp_l32(row + 0x40) ? 1 : 0;
         if (!cnt[t]++) rows[t] = r;
     }
-    if (cnt[0] != 1 || cnt[1] != 1) {
+    return cnt[0] == 1 && cnt[1] == 1;
+}
+// the game's select pages stay alive but draw nothing while the port's menu owns the screen (also their in/out animations): each page
+// gets a copy of its vtable whose draw entry (+0x68, grid page vtable 0x08A733D8 -> 0x089F9F34) is the empty 0x089F8FA0
+static std::map<uint32_t, uint32_t> sm_vtc, sm_vto;
+static bool sm_masked = false;
+static void sm_mask(uint32_t w, bool on) {
+    static const uint32_t PG[] = {0x88, 0x8C, 0x90, 0x94, 0x98, 0xAC};
+    if (!on && !sm_masked) return;
+    sm_masked = on;
+    for (uint32_t off : PG) {
+        uint32_t q = psp_l32(w + off);
+        if (!sm_gp(q)) continue;
+        uint32_t vt = psp_l32(q + 0x40);
+        if (!sm_gp(vt)) continue;
+        if (on && !sm_vto.count(vt)) {
+            uint32_t& cp = sm_vtc[vt];
+            if (!cp) {
+                cp = psp_alloc(0x100);
+                memcpy(psp_p(cp), psp_p(vt), 0x100);
+                psp_s32(cp + 0x68, 0); psp_s32(cp + 0x6C, 0x089F8FA0u);
+                sm_vto[cp] = vt;
+                printf("sel81: pagina +0x%X (vtable 0x%08X, dibujo 0x%08X) sin dibujo mientras manda el menu del port\n", off, vt, psp_l32(vt + 0x6C));
+            }
+            psp_s32(q + 0x40, cp);
+        } else if (!on && sm_vto.count(vt)) psp_s32(q + 0x40, sm_vto[vt]);
+    }
+}
+static bool sm_begin(uint32_t w, uint32_t o) {
+    int rows[2], cnt[2];
+    if (!sm_rows(w, rows, cnt)) {
         static uint32_t lw = 0;
         if (lw != w) { lw = w; printf("sel81: estilo BT3 sin soporte para %d contra %d todavia: seleccion original\n", cnt[0], cnt[1]); }
         return false;
@@ -273,6 +335,13 @@ static bool sm_begin(uint32_t w, uint32_t o) {
         } else d.st = SM_DONE;
     }
     if (sm.ret) for (int k = 1; k >= 0; k--) if (sm.s[k].pad == 0 || sm.s[k].human) { sm.s[k].st = SM_CUSTOM; if (sm.s[k].pad == 0) break; }
+    for (int k = 0; k < 2; k++) {
+        SmAnim& a = sm_an[k];
+        a = SmAnim();
+        if (sm.s[k].st != SM_DONE) { a.in = sm_now; a.on = sm_now; }
+        if (sm.s[k].st == SM_CUSTOM) { a.bev = SB_CUS_IN; a.box = sm_now; }
+    }
+    sm_t0 = sm.ret ? -1 : sm_now;
     sm.ret = false;
     sm.hide = 8;
     if (sm_rng == 0x9E3779B9u) sm_rng ^= (uint32_t)psp_time_us();
@@ -301,6 +370,10 @@ static void sm_cursor(Ctx& c, void (*orig)(Ctx&)) {
     }
     orig(c);
     if (sm_probe_on()) sm_probe(o);
+    if (sm_gp(w) && !sm.on && o == psp_l32(w + 0x70)) {
+        int rows[2], cnt[2];
+        sm_mask(w, sm_style() == 1 && sm_vt_ok(w) && sm_rows(w, rows, cnt));
+    }
     if (!sm_gp(w) || sm.on || sm_style() != 1 || !sm_vt_ok(w)) return;
     if (sm.w != w) { sm.w = w; sm.drv = 0; sm.last = -1; sm.ret = false; }
     uint32_t mc = sm.drv ? sm.drv : psp_l32(w + 0x70);
@@ -329,6 +402,7 @@ bool psp_sel_map_big(int map, std::vector<uint32_t>& px, int* w, int* h);
 int psp_form_row(int menu);
 std::string psp_assets_dir();
 std::string psp_shared_rel(const std::string& legacy);
+std::string psp_shared_file(const std::string& rel);
 struct SmImg { int st = 0; std::vector<uint32_t> px; int w = 0, h = 0; BhTex t{0, 0, 0}; uint32_t use = 0; bool big = false; };
 static std::map<std::string, SmImg> sm_img;
 static std::mutex sm_mx;
@@ -340,7 +414,18 @@ static void sm_worker() {
         std::pair<std::string, std::function<bool(std::vector<uint32_t>&, int*, int*)>> j;
         { std::unique_lock<std::mutex> g(sm_mx); sm_cv.wait(g, [] { return !sm_q.empty(); }); j = std::move(sm_q.front()); sm_q.pop_front(); }
         std::vector<uint32_t> px; int w = 0, h = 0;
-        bool ok = j.second(px, &w, &h) && w > 0 && h > 0 && w <= 1024 && h <= 1024 && px.size() >= (size_t)w * h;
+        bool ok = j.second(px, &w, &h) && w > 1 && h > 1 && px.size() >= (size_t)w * h;
+        while (ok && (w > 1024 || h > 1024)) {   // oversized art: halved until it fits a texture
+            int W = w / 2, H = h / 2;
+            std::vector<uint32_t> o((size_t)W * H);
+            for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+                uint32_t s4[4] = {px[(size_t)(2 * y) * w + 2 * x], px[(size_t)(2 * y) * w + 2 * x + 1], px[(size_t)(2 * y + 1) * w + 2 * x], px[(size_t)(2 * y + 1) * w + 2 * x + 1]}, r = 0;
+                for (int ch = 0; ch < 32; ch += 8) { uint32_t t = 0; for (uint32_t v : s4) t += v >> ch & 255; r |= (t + 2) / 4 << ch; }
+                o[(size_t)y * W + x] = r;
+            }
+            printf("sel81: %s de %dx%d reducida a %dx%d\n", j.first.c_str(), w, h, W, H);
+            px.swap(o); w = W; h = H;
+        }
         std::lock_guard<std::mutex> g(sm_mx);
         SmImg& e = sm_img[j.first];
         if (ok) { e.px.swap(px); e.w = w; e.h = h; e.st = 2; } else e.st = 4;
@@ -377,11 +462,117 @@ static const BhTex* sm_get(const std::string& key, std::function<bool(std::vecto
     return e.st == 3 ? &e.t : nullptr;
 }
 static bool sm_file(const std::string& f, std::vector<uint32_t>& px, int* w, int* h) { return !f.empty() && sz_png(f, px, w, h); }
+// games/ttt/select_bt3/origen.txt: pieces read from the user's own assets (never shipped). One line per layer, same name = more layers:
+// name = lienzo W H | name = <path under assets/Shared> [x y w h] [en dx dy] [tam W H] [color r g b]
+struct SmLayer { std::string path; int cx = 0, cy = 0, cw = 0, ch = 0, dx = 0, dy = 0, sw = 0, sh = 0; float mul[3] = {1, 1, 1}; bool col = false; };
+struct SmOrig { int W = 0, H = 0; std::vector<SmLayer> ly; };
+static const std::map<std::string, SmOrig>& sm_origins() {
+    static std::map<std::string, SmOrig> m;
+    static bool done = false;
+    if (done) return m;
+    done = true;
+    FILE* fp = fopen("../../games/ttt/select_bt3/origen.txt", "rb");
+    if (!fp) return m;
+    char ln[512];
+    int bad = 0;
+    while (fgets(ln, sizeof ln, fp)) {
+        std::string l = ln;
+        size_t hs = l.find('#');
+        if (hs != std::string::npos) l = l.substr(0, hs);
+        size_t e = l.find('=');
+        if (e == std::string::npos) continue;
+        std::vector<std::string> t;
+        auto split = [&](const std::string& x, std::vector<std::string>& o) { size_t i = 0; while (i < x.size()) { while (i < x.size() && isspace((unsigned char)x[i])) i++; size_t j = i; while (j < x.size() && !isspace((unsigned char)x[j])) j++; if (j > i) o.push_back(x.substr(i, j - i)); i = j; } };
+        std::vector<std::string> k;
+        split(l.substr(0, e), k); split(l.substr(e + 1), t);
+        if (k.size() != 1 || t.empty()) continue;
+        SmOrig& o = m[k[0]];
+        auto num = [&](size_t i) { return i < t.size() ? atof(t[i].c_str()) : 0.0; };
+        if (t[0] == "lienzo") { o.W = (int)num(1); o.H = (int)num(2); continue; }
+        SmLayer y;
+        y.path = t[0];
+        size_t i = 1;
+        if (t.size() >= 5 && isdigit((unsigned char)t[1][0])) { y.cx = (int)num(1); y.cy = (int)num(2); y.cw = (int)num(3); y.ch = (int)num(4); i = 5; }
+        for (; i < t.size(); i++) {
+            if (t[i] == "en") { y.dx = (int)num(i + 1); y.dy = (int)num(i + 2); i += 2; }
+            else if (t[i] == "tam") { y.sw = (int)num(i + 1); y.sh = (int)num(i + 2); i += 2; }
+            else if (t[i] == "color") { for (int c = 0; c < 3; c++) y.mul[c] = (float)num(i + 1 + c); y.col = true; i += 3; }
+            else bad++;
+        }
+        o.ly.push_back(y);
+    }
+    fclose(fp);
+    printf("sel81: origen.txt: %d piezas del juego original%s\n", (int)m.size(), bad ? " (con palabras desconocidas)" : "");
+    return m;
+}
+static bool sm_layer(const SmLayer& y, std::vector<uint32_t>& px, int* w, int* h) {
+    std::string f = psp_shared_file(y.path);
+    std::vector<uint32_t> s; int W = 0, H = 0;
+    if (!sm_file(f, s, &W, &H)) return false;
+    int cw = y.cw > 0 ? y.cw : W, ch = y.ch > 0 ? y.ch : H;
+    if (y.cx < 0 || y.cy < 0 || y.cx + cw > W || y.cy + ch > H) { printf("sel81: recorte fuera de %s (%dx%d)\n", f.c_str(), W, H); return false; }
+    int ow = y.sw > 0 ? y.sw : cw, oh = y.sh > 0 ? y.sh : ch;
+    px.assign((size_t)ow * oh, 0);
+    for (int j = 0; j < oh; j++) for (int i = 0; i < ow; i++) {   // bilinear over the crop (identity when not scaled)
+        float u = ow == cw ? (float)i : std::max(0.0f, std::min((float)cw - 1, (i + 0.5f) * cw / ow - 0.5f));
+        float v = oh == ch ? (float)j : std::max(0.0f, std::min((float)ch - 1, (j + 0.5f) * ch / oh - 0.5f));
+        int u0 = (int)u, v0 = (int)v, u1 = std::min(u0 + 1, cw - 1), v1 = std::min(v0 + 1, ch - 1);
+        float fu = u - u0, fv = v - v0, acc[4] = {0, 0, 0, 0};
+        uint32_t q[4] = {s[(size_t)(y.cy + v0) * W + y.cx + u0], s[(size_t)(y.cy + v0) * W + y.cx + u1], s[(size_t)(y.cy + v1) * W + y.cx + u0], s[(size_t)(y.cy + v1) * W + y.cx + u1]};
+        float wq[4] = {(1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv};
+        for (int n = 0; n < 4; n++) for (int c = 0; c < 4; c++) acc[c] += wq[n] * (q[n] >> (8 * c) & 255);
+        uint32_t r = 0;
+        for (int c = 0; c < 4; c++) { float x = acc[c] * (c < 3 && y.col ? y.mul[c] : 1.0f) + 0.5f; r |= (uint32_t)std::min(255.0f, x) << (8 * c); }
+        px[(size_t)j * ow + i] = r;
+    }
+    *w = ow; *h = oh;
+    return true;
+}
+static bool sm_orig_png(const SmOrig& o, std::vector<uint32_t>& px, int* w, int* h) {
+    if (o.ly.empty()) return false;
+    if (o.ly.size() == 1 && !o.W && !o.ly[0].dx && !o.ly[0].dy) return sm_layer(o.ly[0], px, w, h);
+    std::vector<std::pair<std::vector<uint32_t>, std::pair<int, int>>> L;
+    int W = o.W, H = o.H;
+    for (auto& y : o.ly) {
+        std::vector<uint32_t> p; int lw = 0, lh = 0;
+        if (!sm_layer(y, p, &lw, &lh)) return false;
+        if (!o.W) { W = std::max(W, y.dx + lw); H = std::max(H, y.dy + lh); }
+        L.push_back({std::move(p), {lw, lh}});
+    }
+    if (W <= 0 || H <= 0) return false;
+    px.assign((size_t)W * H, 0);
+    for (size_t n = 0; n < L.size(); n++) {   // layers over each other in order (straight alpha)
+        int lw = L[n].second.first, lh = L[n].second.second, dx = o.ly[n].dx, dy = o.ly[n].dy;
+        for (int j = 0; j < lh; j++) for (int i = 0; i < lw; i++) {
+            int X = dx + i, Y = dy + j;
+            if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+            uint32_t sp = L[n].first[(size_t)j * lw + i], &dp = px[(size_t)Y * W + X];
+            float sa = (sp >> 24) / 255.0f, da = (dp >> 24) / 255.0f, oa = sa + da * (1 - sa);
+            if (oa <= 0) { dp = 0; continue; }
+            uint32_t r = (uint32_t)(oa * 255 + 0.5f) << 24;
+            for (int c = 0; c < 3; c++) r |= (uint32_t)(((sp >> (8 * c) & 255) * sa + (dp >> (8 * c) & 255) * da * (1 - sa)) / oa + 0.5f) << (8 * c);
+            dp = r;
+        }
+    }
+    *w = W; *h = H;
+    return true;
+}
 static const BhTex* sm_piece(const char* name) {
     std::string k = std::string("p:") + name;
     return sm_get(k, [n = std::string(name)](std::vector<uint32_t>& px, int* w, int* h) {
-        bool ok = sm_file("../../games/ttt/select_bt3/" + n + ".png", px, w, h);
-        if (!ok) printf("sel81: falta games/ttt/select_bt3/%s.png\n", n.c_str());
+        auto it = sm_origins().find(n);
+        if (it != sm_origins().end()) {
+            if (sm_orig_png(it->second, px, w, h)) return true;
+            printf("sel81: falta la pieza original %s (%s)\n", n.c_str(), it->second.ly.empty() ? "" : it->second.ly[0].path.c_str());
+        }
+        std::string f = "../../games/ttt/select_bt3/" + n + ".png";
+        bool ok = sm_file(f, px, w, h);
+        if (!ok) {
+            FILE* fp = fopen(f.c_str(), "rb");
+            if (fp) fclose(fp);
+            if (n.compare(0, 7, "custom_") || n.compare(0, 12, "custom_title") == 0 || n == "custom_row" || n == "custom_row_on")
+                printf("sel81: %s games/ttt/select_bt3/%s.png\n", fp ? "no se pudo leer (formato PNG)" : "falta", n.c_str());
+        }
         return ok;
     });
 }
@@ -478,9 +669,20 @@ static void sm_at(const BhTex* t, float x, float y, float w = -1, float h = -1, 
     if (h < 0) h = (float)t->oh;
     bh_quad(t, flip ? (float)t->ow : 0, flip ? 0 : (float)t->ow, 0, (float)t->oh, x, x + w, y, y + h, col);
 }
-static void sm_text_at(const BhTex* t, float x0, float y0, float cw, float ch) {   // the 2x text image in a cw x ch cell
-    if (t) bh_quad(t, 0, (float)t->ow, 0, (float)t->oh, x0, x0 + cw, y0, y0 + ch);
+static void sm_text_at(const BhTex* t, float x0, float y0, float cw, float ch, uint32_t col = 0xFFFFFFFFu) {   // the 2x text image in a cw x ch cell
+    if (t) bh_quad(t, 0, (float)t->ow, 0, (float)t->oh, x0, x0 + cw, y0, y0 + ch, col);
 }
+static void sm_qc(const BhTex* t, float u0, float u1, float v0, float v1, float x0, float x1, float y0, float y1, uint32_t col, float cx0, float cx1, float cy0, float cy1) {
+    if (!t || x1 <= x0 || y1 <= y0) return;
+    float ku = (u1 - u0) / (x1 - x0), kv = (v1 - v0) / (y1 - y0);
+    if (x0 < cx0) { u0 += (cx0 - x0) * ku; x0 = cx0; }
+    if (x1 > cx1) { u1 -= (x1 - cx1) * ku; x1 = cx1; }
+    if (y0 < cy0) { v0 += (cy0 - y0) * kv; y0 = cy0; }
+    if (y1 > cy1) { v1 -= (y1 - cy1) * kv; y1 = cy1; }
+    if (x1 > x0 && y1 > y0) bh_quad(t, u0, u1, v0, v1, x0, x1, y0, y1, col);
+}
+static float sm_cl(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+static uint32_t sm_a(float a, uint32_t rgb = 0xFFFFFFu) { return (uint32_t)(sm_cl(a) * 255.0f + 0.5f) << 24 | (rgb & 0xFFFFFFu); }
 static const BhTex* sm_white() {
     return sm_get("w", [](std::vector<uint32_t>& px, int* w, int* h) { px.assign(64, 0xFFFFFFFFu); *w = *h = 8; return true; });
 }
@@ -488,89 +690,87 @@ static const BhTex* sm_white() {
 static const float SM_TOP = 0, SM_BOT = 211, SM_NAME = 164, SM_FORMY = 191, SM_RY0 = 40, SM_RY1 = 209, SM_BAR = 251;
 static float sm_alpha[2];
 static int sm_akey[2] = {-1, -1};
+static float sm_ent(float t0, float len) { return sm_t0 < 0 ? 1.0f : sm_cl((sm_now - sm_t0 - t0) / len); }   // main movie entrance
 static void sm_side_render(int k, uint32_t dvb) {   // big render of the side over the map, in its half; fades in on change (BT3 face +0.075 a frame)
     SmSide& d = sm.s[k];
     const RosterCell& cl = sm_cell(d.pos);
     int f = d.form < cl.n ? d.form : 0, m = cl.ids[f];
     bool top = k == 0;
-    if (sm_random(d.pos)) return;
+    if (sm_random(d.pos) || (sm_t0 >= 0 && sm_now - sm_t0 < 14)) return;
     int col = d.st >= SM_COLOR ? d.col + (d.dmg == 2 ? 64 : 0) : 0, key = m * 256 + col;
     const BhTex* b = sm_big(m, col);
     if (key != sm_akey[k]) { sm_akey[k] = key; sm_alpha[k] = 0; }
     if (!b) return;
     sm_alpha[k] = std::min(1.0f, sm_alpha[k] + 0.075f * (float)dvb);
-    float hh = SM_RY1 - SM_RY0, ww = hh * b->ow / (float)b->oh, cx = top ? 120.0f : 360.0f;
+    float sl = (1.0f - sm_ent(14, 15)) * 240.0f * (top ? -1.0f : 1.0f);
+    float hh = SM_RY1 - SM_RY0, ww = hh * b->ow / (float)b->oh, cx = (top ? 120.0f : 360.0f) + sl;
     float x0 = cx - ww / 2, x1 = cx + ww / 2, lo = top ? 0.0f : 241.0f, hi = top ? 239.0f : 480.0f;
     float u0 = 0, u1 = (float)b->ow, k0 = (float)b->ow / ww;
     if (x0 < lo) { u0 += (lo - x0) * k0; x0 = lo; }
     if (x1 > hi) { u1 -= (x1 - hi) * k0; x1 = hi; }
+    if (x1 <= x0) return;
     if (!top) { float t = u0; u0 = (float)b->ow - u1; u1 = (float)b->ow - t; std::swap(u0, u1); }
-    bh_quad(b, u0, u1, 0, (float)b->oh, x0, x1, SM_RY0, SM_RY1, (uint32_t)(sm_alpha[k] * 255) << 24 | 0xFFFFFFu);
+    bh_quad(b, u0, u1, 0, (float)b->oh, x0, x1, SM_RY0, SM_RY1, sm_a(sm_alpha[k]));
 }
-static void sm_side_draw(const Ctx& c, int k) {
-    SmSide& d = sm.s[k];
-    const RosterCell& cl = sm_cell(d.pos);
-    int f = d.form < cl.n ? d.form : 0, m = cl.ids[f], n = sm_cells(), l = sm_lang();
-    bool top = k == 0, rnd = sm_random(d.pos);
-    bool solo = (sm.s[0].human || sm.s[1].human) && !sm.s[1].human;   // one pad: J1's reel goes away on the COM turn
-    bool hidden = top && solo && sm.s[0].st == SM_DONE && sm.s[1].st != SM_DONE;
-    bool waiting = !top && solo && sm.s[0].st != SM_DONE;
-    // name and form plates (form in yellow, inside the plate before its slanted end)
-    sm_at(sm_piece(top ? "name_plate_l" : "name_plate_r"), top ? 0 : 248, SM_NAME);
-    sm_at(sm_piece(top ? "form_plate_l" : "form_plate_r"), top ? 0 : 272, SM_FORMY);
-    std::string nm = rnd ? (l ? "Aleatorio" : "Random") : sm_name(c, m), fm = rnd ? "" : sm_form(m);
-    sm_text_at(sm_text(nm, 0, 200, 22, top ? 2 : 0), top ? 20 : 260, SM_NAME + 2, 200, 22);
-    if (!fm.empty()) if (const BhTex* t = sm_text(fm, 1, 170, 14, top ? 2 : 0)) bh_quad(t, 0, (float)t->ow, 0, (float)t->oh, top ? 20.0f : 290.0f, top ? 190.0f : 460.0f, SM_FORMY + 2, SM_FORMY + 16, 0xFF00F0FFu);
-    if (hidden) return;
-    // reel: the cursor's row, or the cell's forms from the form reel on (unused positions X)
-    float sy = top ? SM_TOP : SM_BOT;
-    sm_at(sm_piece(waiting ? "strip_off" : top ? "strip_p1" : "strip_p2"), 0, sy);
-    bool forms = d.st >= SM_FORM && cl.n > 1 && !rnd;
-    int r0 = forms ? 0 : d.pos / 7 * 7, cur = forms ? f : d.pos % 7;
-    for (int i = 0; i < 7; i++) {
-        float x = top ? 70.0f + 56 * i : 24.0f + 56 * i, y = sy + 3;
-        int mi = forms ? (i < cl.n ? cl.ids[i] : -1) : (r0 + i < n ? sm_cell(r0 + i).ids[0] : -2);
-        if (mi == -2) continue;
-        if (mi == -1) sm_at(sm_piece("cell_x"), x + 2, y + 2);
-        else sm_at(sm_small(mi), x + 2, y + 2, 46, 30);
-        sm_at(sm_piece("cell_frame"), x, y);
-        if (i == cur && !waiting) sm_at(sm_piece("cursor"), x - 2, y - 2);
-    }
-    char tg[16];
-    if (d.human) snprintf(tg, sizeof tg, "tag_p%d_%s", d.pad + 1, l ? "es" : "en"); else snprintf(tg, sizeof tg, "tag_com");
-    if (const BhTex* t = sm_piece(tg)) {
-        float h = 24, w = h * t->ow / t->oh;
-        if (w > 60) { w = 60; h = w * t->oh / t->ow; }
-        float cx = top ? 35.0f : 445.0f, cy = sy + 20;
-        sm_at(t, cx - w / 2, cy - h / 2, w, h);
-    }
-    if (d.st == SM_CUSTOM) {   // the game's customize page (state 4): Default, Custom 1..3, vertical
-        float bx = top ? 8.0f : 248.0f, by = 42;
-        sm_at(sm_piece("color_box"), bx, by, 224, 168);
-        sm_at(sm_piece(l ? "custom_title_es" : "custom_title_en"), bx + 4, by + 4);
-        for (int row = 0; row < 4; row++) {
-            float rx = bx + 8, ry = by + 36 + 32 * row;
-            sm_at(sm_piece(d.cus == row ? "color_row_on" : "color_row"), rx, ry);
-            char b[40];
-            if (!row) snprintf(b, sizeof b, "%s", l ? "Predeterminado" : "Default");
-            else snprintf(b, sizeof b, "%s %d", l ? "Personalizado" : "Custom", row);
-            sm_text_at(sm_text(b, 1, 160, 16, 1), rx + 24, ry + 7, 160, 16);
-        }
+// chip scale of the BT3 chip sprite: fl_on_start 1.0 -> 1.2 in 4 frames, fl_on_loop 1.2 -> 1.1 -> 1.2 every 50, fl_off_start 1.16 -> 1.0,
+// fl_ok chip 1.2 -> 1.1 -> 1.2 and cursor 1.2 -> 1.0 -> 1.2 in 10 frames, then held
+static float sm_on_s(float t) {
+    if (t < 4) return 1.0f + 0.05f * t;
+    float u = fmodf(t - 4, 50.0f);
+    return u <= 24 ? 1.2f - 0.1f * u / 24 : 1.1f + 0.1f * (u - 24) / 26;
+}
+static void sm_chip_s(const SmAnim& a, float& sc, float& scur) {
+    if (a.ok >= 0 && a.ok >= a.on) {
+        float t = sm_now - a.ok;
+        if (t >= 10) { sc = scur = 1.2f; return; }
+        sc = t <= 5 ? 1.2f - 0.02f * t : 1.1f + 0.02f * (t - 5);
+        scur = t <= 5 ? 1.2f - 0.04f * t : 1.0f + 0.04f * (t - 5);
         return;
     }
-    // colour box
-    if (d.st != SM_COLOR) return;
-    uint32_t ent = 0;
+    sc = scur = a.on >= 0 ? sm_on_s(sm_now - a.on) : 1.0f;
+}
+// both boxes: 0 colour (BT3 custom window: fl_custom_in / fl_custom_cansel), 1 customize (BT3 colour window: fl_color_in / fl_color_cansel /
+// fl_color_ok); shown amount 0..1 = offset toward the side's edge and alpha
+static float sm_box_q(const SmSide& d, const SmAnim& a, int b) {
+    float t = sm_now - a.box;
+    if (a.box < 0 || t > 30) return (b == 0 && d.st == SM_COLOR) || (b == 1 && d.st == SM_CUSTOM) ? 1.0f : 0.0f;
+    switch (a.bev) {
+    case SB_COL_IN: return b ? 0 : sm_cl((t + 1) / 15);
+    case SB_COL_OUT: return b ? 0 : sm_cl(1 - t / 14);
+    case SB_SWAP: return b ? (t < 9 ? 0 : sm_cl((t - 8) / 15)) : (t < 9 ? 1 : sm_cl(1 - (t - 8) / 15));
+    case SB_SWAP_BACK: return b ? sm_cl(1 - t / 14) : sm_cl(t / 14);
+    case SB_CUS_OK: return b ? (t < 10 ? 1 : t >= 24 ? 0 : sm_cl(1 - (t - 9) / 15)) : 0;
+    case SB_CUS_IN: return b ? sm_cl((t + 1) / 15) : 0;
+    }
+    return 0;
+}
+// boxes at SM_BS of the BT3 size, anchored to the side's outer edge; inner layout in 1x units scaled from the box origin
+static const float SM_BS = 0.72f, SM_BW = 224 * SM_BS;
+static void sm_bq(const BhTex* t, float bx, float by, float x, float y, float w, float h, uint32_t col) {
+    if (!t) return;
+    if (w < 0) { w = (float)t->ow; h = (float)t->oh; }
+    sm_at(t, bx + x * SM_BS, by + y * SM_BS, w * SM_BS, h * SM_BS, col);
+}
+static void sm_bt(const BhTex* t, float bx, float by, float x, float y, float w, float h, uint32_t col) { sm_text_at(t, bx + x * SM_BS, by + y * SM_BS, w * SM_BS, h * SM_BS, col); }
+static void sm_box_title(const char* a, const char* b, float bx, float by, uint32_t col) {   // titles at the colour title's 26 high, own aspect
+    const BhTex* t = sm_piece(sm_lang() ? b : a);
+    if (t) sm_bq(t, bx, by, 4, 4, 26.0f * t->ow / t->oh, 26, col);
+}
+static void sm_box_col(const Ctx& c, int k, float bx, float al) {
+    SmSide& d = sm.s[k];
+    const RosterCell& cl = sm_cell(d.pos);
+    int m = cl.ids[d.form < cl.n ? d.form : 0], l = sm_lang();
+    uint32_t ent = 0, ca = sm_a(al);
     int av = net_online_ranked() ? 0 : cs_av_of(c, m, d.col, &ent) & 6, nc = sm_ncol(m);
-    float bx = top ? 8.0f : 248.0f, by = 46, bh = av ? 110.0f : 76.0f;
-    sm_at(sm_piece("color_box"), bx, by, 224, bh);
-    sm_at(sm_piece(l ? "color_title_es" : "color_title_en"), bx + 4, by + 4);
+    float by = 46, bh = av ? 110.0f : 76.0f;
+    sm_bq(sm_piece("color_box"), bx, by, 0, 0, 224, bh, ca);
+    sm_box_title("color_title_en", "color_title_es", bx, by, ca);
     float wob = (sm_frame / 8) & 1 ? 2.0f : 0.0f;
     for (int row = 0; row < (av ? 2 : 1); row++) {
-        float rx = bx + 8, ry = by + 38 + 34 * row;
-        bool on = d.foc == row;
-        sm_at(sm_piece(on ? "color_row_on" : "color_row"), rx, ry);
-        if (on) { sm_at(sm_piece("arrow_l"), rx + 4 + wob, ry + 7); sm_at(sm_piece("arrow_r"), rx + 182 - wob, ry + 7); }
+        float rx = 8, ry = 38 + 34 * row;
+        bool on = d.foc == row && d.st == SM_COLOR;
+        sm_bq(sm_piece(on ? "color_row_on" : "color_row"), bx, by, rx, ry, -1, -1, ca);
+        if (on) { sm_bq(sm_piece("arrow_l"), bx, by, rx + 4 + wob, ry + 7, -1, -1, ca); sm_bq(sm_piece("arrow_r"), bx, by, rx + 182 - wob, ry + 7, -1, -1, ca); }
         std::string t;
         if (!row) {
             std::string cn = ent && nc > 1 ? psp_colour_name(ent, l) : std::string();
@@ -580,15 +780,124 @@ static void sm_side_draw(const Ctx& c, int k) {
             bool two = (av & 6) == 6;
             t = d.dmg == 0 ? "Normal" : two ? (l ? (d.dmg == 1 ? "Dañado 1" : "Dañado 2") : (d.dmg == 1 ? "Damaged 1" : "Damaged 2")) : (l ? "Dañado" : "Damaged");
         }
-        sm_text_at(sm_text(t, 1, 160, 16, 1), rx + 24, ry + 7, 160, 16);
+        sm_bt(sm_text(t, 1, 160, 16, 1), bx, by, rx + 24, ry + 7, 160, 16, ca);
     }
 }
+static void sm_box_cus(int k, float bx, float al) {   // the game's customize page (state 4): Default, Custom 1..3; original rows and labels when present
+    SmSide& d = sm.s[k];
+    int l = sm_lang();
+    uint32_t ca = sm_a(al);
+    float by = 42;
+    sm_bq(sm_piece("color_box"), bx, by, 0, 0, 224, 168, ca);
+    sm_box_title("custom_title_en", "custom_title_es", bx, by, ca);
+    for (int row = 0; row < 4; row++) {
+        float rx = 8, ry = 36 + 32 * row;
+        bool on = d.cus == row;
+        const BhTex* rp = sm_piece(on ? "custom_row_on" : "custom_row");
+        sm_bq(rp ? rp : sm_piece(on ? "color_row_on" : "color_row"), bx, by, rx, ry, 208, 30, ca);
+        char nm[32];
+        snprintf(nm, sizeof nm, "custom_opt%d%s_%s", row, on ? "_on" : "", l ? "es" : "en");
+        if (rp) if (const BhTex* t = sm_piece(nm)) { float h = 18, w = h * t->ow / t->oh; if (w > 196) { w = 196; h = w * t->oh / t->ow; } sm_bq(t, bx, by, rx + 104 - w / 2, ry + 15 - h / 2, w, h, ca); continue; }
+        char b[40];
+        if (!row) snprintf(b, sizeof b, "%s", l ? "Predeterminado" : "Default");
+        else snprintf(b, sizeof b, "%s %d", l ? "Personalizado" : "Custom", row);
+        sm_bt(sm_text(b, 1, 160, 16, 1), bx, by, rx + 24, ry + 7, 160, 16, ca);
+    }
+}
+static void sm_side_draw(const Ctx& c, int k) {
+    SmSide& d = sm.s[k];
+    SmAnim& a = sm_an[k];
+    const RosterCell& cl = sm_cell(d.pos);
+    int f = d.form < cl.n ? d.form : 0, m = cl.ids[f], n = sm_cells(), l = sm_lang();
+    bool top = k == 0, rnd = sm_random(d.pos);
+    float dir = top ? -1.0f : 1.0f;
+    bool solo = (sm.s[0].human || sm.s[1].human) && !sm.s[1].human;   // one pad: the COM reel waits while J1 picks
+    bool waiting = !top && solo && sm.s[0].st != SM_DONE;
+    if (a.wait && !waiting) a.on = sm_now;
+    a.wait = waiting;
+    // name and form plates (main movie: plates in 8 frames from 14, texts in 7 from 22; form in yellow, inside the plate)
+    float pd = (1 - sm_ent(14, 8)) * 240 * dir, te = sm_ent(22, 7), td = (1 - te) * 194 * dir;
+    sm_at(sm_piece(top ? "name_plate_l" : "name_plate_r"), (top ? 0 : 248) + pd, SM_NAME);
+    sm_at(sm_piece(top ? "form_plate_l" : "form_plate_r"), (top ? 0 : 272) + pd, SM_FORMY);
+    std::string nm = rnd ? (l ? "Aleatorio" : "Random") : sm_name(c, m), fm = rnd ? "" : sm_form(m);
+    if (te > 0) {
+        sm_text_at(sm_text(nm, 0, 200, 22, top ? 2 : 0), (top ? 20 : 260) + td, SM_NAME + 2, 200, 22, sm_a(te));
+        if (!fm.empty()) if (const BhTex* t = sm_text(fm, 1, 170, 14, top ? 2 : 0))
+            bh_quad(t, 0, (float)t->ow, 0, (float)t->oh, (top ? 20.0f : 290.0f) + td, (top ? 190.0f : 460.0f) + td, SM_FORMY + 2, SM_FORMY + 16, sm_a(te, 0x00F0FFu));
+    }
+    // reel (fl_in: 14 frames from the side's edge; fl_out: 14 frames, then 15 to the edge; gone while DONE)
+    float rq = 1;
+    if (a.out >= 0) { float t = sm_now - a.out; rq = t < 14 ? 1 : sm_cl(1 - (t - 14) / 15); }
+    else if (a.in >= 0) rq = sm_cl((sm_now - a.in) / 14);
+    if (d.st == SM_DONE && (a.out < 0 || sm_now - a.out >= 29)) rq = 0;
+    if (rq > 0) {
+        float rx = (1 - rq) * 488 * dir, sy = top ? SM_TOP : SM_BOT;
+        uint32_t ca = sm_a(rq);
+        sm_at(sm_piece(waiting ? "strip_off" : top ? "strip_p1" : "strip_p2"), rx, sy, -1, -1, ca);
+        char tg[16];
+        if (d.human) snprintf(tg, sizeof tg, "tag_p%d_%s", d.pad + 1, l ? "es" : "en"); else snprintf(tg, sizeof tg, "tag_com");
+        if (const BhTex* t = sm_piece(tg)) {
+            float h = 24, w = h * t->ow / t->oh;
+            if (w > 60) { w = 60; h = w * t->oh / t->ow; }
+            float cx = (top ? 35.0f : 445.0f) + rx, cy = sy + 20;
+            sm_at(t, cx - w / 2, cy - h / 2, w, h, ca);
+        }
+        // chips: fl_reel_up/down = rows slide one strip in 8 frames; fl_form = window closes right to left in 17 frames, contents swap, opens in 17
+        float L = (top ? 70.0f : 24.0f) + rx, R = L + 56 * 7, cx0 = -1e4f, cx1 = 1e4f, cy0 = -1e4f, cy1 = 1e4f;
+        bool forms = sm_forms(d), plain = false;
+        float wt = sm_now - a.wipe;
+        if (a.wipe >= 0 && wt < 34) {
+            cx1 = wt < 17 ? R - (R - L) * wt / 17 : L + (R - L) * (wt - 17) / 17;
+            if (wt < 18) { forms = a.wforms; plain = true; }
+        }
+        float rt = sm_now - a.row, dy = 0;
+        bool sliding = a.row >= 0 && rt < 8 && !forms && !plain;
+        if (sliding) { dy = a.rdir * 40 * (1 - rt / 8); cy0 = sy; cy1 = sy + 40; }
+        float sc, scur;
+        sm_chip_s(a, sc, scur);
+        int cur = forms ? f : d.pos % 7;
+        auto chip = [&](int mi, int i, float y, float s, float s2, bool cursor) {
+            float x = L + 56 * i, ccx = x + 25, ccy = y + 17;
+            auto q = [&](const BhTex* t, float x0, float y0, float w, float h, float ss) {
+                if (!t) return;
+                if (w < 0) { w = (float)t->ow; h = (float)t->oh; }
+                float X0 = ccx + (x0 - ccx) * ss, X1 = ccx + (x0 + w - ccx) * ss, Y0 = ccy + (y0 - ccy) * ss, Y1 = ccy + (y0 + h - ccy) * ss;
+                sm_qc(t, 0, (float)t->ow, 0, (float)t->oh, X0, X1, Y0, Y1, ca, cx0, cx1, cy0, cy1);
+            };
+            if (mi == -1) q(sm_piece("cell_x"), x + 2, y + 2, -1, -1, s);
+            else q(sm_small(mi), x + 2, y + 2, 46, 30, s);
+            q(sm_piece("cell_frame"), x, y, -1, -1, s);
+            if (cursor) q(sm_piece("cursor"), x - 2, y - 2, -1, -1, s2);
+        };
+        auto row_mi = [&](bool fr, int r0, int i) { return fr ? (i < cl.n ? cl.ids[i] : -1) : (r0 + i < n ? sm_cell(r0 + i).ids[0] : -2); };
+        int r0 = forms ? 0 : d.pos / 7 * 7;
+        if (plain && !forms) r0 = d.pos / 7 * 7;
+        if (sliding) for (int i = 0; i < 7; i++) { int mi = row_mi(false, a.rold, i); if (mi != -2) chip(mi, i, sy + 3 + dy - a.rdir * 40, 1, 1, false); }
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < 7; i++) {
+                bool isc = i == cur && !plain && !waiting;
+                if ((pass == 1) != isc) continue;
+                int mi = row_mi(forms, r0, i);
+                if (mi == -2) continue;
+                float s = 1;
+                if (isc) s = sc;
+                else if (!plain && !waiting && i == a.offi && a.off >= 0 && sm_now - a.off < 4) s = 1.16f - 0.04f * (sm_now - a.off);
+                chip(mi, i, sy + 3 + dy, s, scur, isc);
+            }
+    }
+    // colour and customize boxes slide 232 toward the side's edge with their alpha
+    float q0 = sm_box_q(d, a, 0), q1 = sm_box_q(d, a, 1), bx = top ? 4.0f : 476.0f - SM_BW, tr = SM_BW + 8;
+    if (q0 > 0.01f) sm_box_col(c, k, bx + (1 - q0) * tr * dir, q0);
+    if (q1 > 0.01f) sm_box_cus(k, bx + (1 - q1) * tr * dir, q1);
+}
 static bool sm_draw(const Ctx& c) {
+    if (sm_masked && !sm.on && sm_gp(sm.w) && c.r[4] == psp_l32(sm.w + 0x84)) return true;   // grid page: nothing until the port's menu starts
     if (!sm.on || c.r[4] != psp_l32(sm.w + 0x84)) return false;
     sm_frame++;
     static uint32_t lvb = 0;
     uint32_t vb = psp_l32(0x08A78E14u), dvb = lvb && vb > lvb && vb - lvb < 8 ? vb - lvb : 1;
     lvb = vb;
+    sm_now += (float)dvb;
     if (!bh_vbuf) bh_vbuf = psp_reserve(4 * 0x8000);
     static bool said = false;
     if (!said) { said = true; printf("sel81: dibujo del menu BT3 activo\n"); }
